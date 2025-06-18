@@ -177,11 +177,22 @@ async function toStream(t) {
     const flags = langMatches.map(code => langToFlag[code.toUpperCase()]).filter(Boolean);
     const flagsText = flags.length ? `\n${flags.join(" / ")}` : "";
 
-    let cleanedTitle = t.name.replace(/^Stiahni si\s*/i, "").trim();
+    // OPRAVENÉ ČIŠTĚNÍ NÁZVU - odstraní všechny možné prefixy
+    let cleanedTitle = t.name
+        .replace(/^(Stiahni si filmy s titulkami|Stahni si filmy s titulkama|Stiahni si seriály|Stiahni si|Stahni si)\s*/i, "")
+        .trim();
+    
+    // Odstranění kategorie z začátku názvu (pokud tam je)
     const categoryPrefix = t.category.trim().toLowerCase();
     if (cleanedTitle.toLowerCase().startsWith(categoryPrefix)) {
         cleanedTitle = cleanedTitle.slice(t.category.length).trim();
     }
+    
+    // Dodatečné čištění - odstranění běžných prefixů
+    cleanedTitle = cleanedTitle
+        .replace(/^(film|serial|movie|series)\s*[-:]\s*/i, "")
+        .replace(/^\s*[-:]\s*/, "")
+        .trim();
 
     const infoHash = await getInfoHashFromTorrent(t.downloadUrl);
     if (!infoHash) return null;
