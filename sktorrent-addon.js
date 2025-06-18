@@ -35,13 +35,12 @@ if (ADDON_API_KEY) {
 
 console.log(`🎮 Stream mode: ${STREAM_MODE}`);
 
-// OPRAVENO: Správná doména sktorrent.eu
 const BASE_URL = "https://sktorrent.eu";
 const SEARCH_URL = `${BASE_URL}/torrent/torrents_v2.php`;
 
 const builder = addonBuilder({
     id: "org.stremio.sktorrent.hybrid.secure",
-    version: "1.5.1",
+    version: "1.5.3",
     name: `SKTorrent Hybrid (${STREAM_MODE})`,
     description: `Private Real-Debrid + Torrent addon with API key protection - Mode: ${STREAM_MODE}`,
     types: ["movie", "series"],
@@ -81,38 +80,6 @@ function extractQuality(title) {
     return 'SD';
 }
 
-// NOVÁ FUNKCE: Čištění názvu torrentu (použitelná pro RD i torrent streamy)
-function cleanTorrentName(torrentName) {
-    let cleanedTitle = torrentName;
-
-    console.log(`[CLEAN] Původní: "${cleanedTitle}"`);
-
-    // Odstranění konkrétních prefixů
-    cleanedTitle = cleanedTitle
-        .replace(/^Stiahni si Filmy s titulkama\s*/i, "")
-        .replace(/^Stiahni si Filmy bez titulků\s*/i, "")
-        .replace(/^Stiahni si Filmy\s*/i, "")
-        .replace(/^Stiahni si\s*/i, "")
-        .replace(/^Stahni si Filmy s titulkama\s*/i, "")
-        .replace(/^Stahni si Filmy bez titulků\s*/i, "")
-        .replace(/^Stahni si Filmy\s*/i, "")
-        .replace(/^Stahni si\s*/i, "")
-        .replace(/^(download|stahuj|stahnout)\s*/i, "")
-        .trim();
-
-    // Čištění separátorů na začátku
-    cleanedTitle = cleanedTitle.replace(/^[-:•·\s]+/, "").trim();
-
-    // Bezpečnostní kontrola
-    if (cleanedTitle.length < 2) {
-        cleanedTitle = torrentName;
-    }
-
-    console.log(`[CLEAN] Vyčištěný: "${cleanedTitle}"`);
-
-    return cleanedTitle;
-}
-
 async function getTitleFromIMDb(imdbId) {
     try {
         const res = await axios.get(`https://www.imdb.com/title/${imdbId}/`, {
@@ -139,6 +106,7 @@ async function getTitleFromIMDb(imdbId) {
     }
 }
 
+// PŮVODNÍ searchTorrents funkce (nezměněno)
 async function searchTorrents(query) {
     console.log(`[INFO] 🔎 Hľadám '${query}' na SKTorrent...`);
     try {
@@ -156,7 +124,7 @@ async function searchTorrents(query) {
             const outerTd = parent.closest("td");
             const fullBlock = outerTd.text().replace(/\s+/g, ' ').trim();
             const href = parent.attr("href") || "";
-            const tooltip = parent.attr("title") || "";
+            const tooltip = parent.attr("title") || ""; // PŮVODNÍ - používá tooltip
             const torrentId = href.split("id=").pop();
             const category = outerTd.find("b").first().text().trim();
             const sizeMatch = fullBlock.match(/Velkost\s([^|]+)/i);
@@ -165,7 +133,7 @@ async function searchTorrents(query) {
             const seeds = seedMatch ? seedMatch[1] : "0";
             if (!category.toLowerCase().includes("film") && !category.toLowerCase().includes("seri")) return;
             results.push({
-                name: tooltip,
+                name: tooltip, // PŮVODNÍ - používá tooltip
                 id: torrentId,
                 size,
                 seeds,
@@ -201,7 +169,7 @@ async function getInfoHashFromTorrent(url) {
     }
 }
 
-// UPRAVENÁ toStream funkce - používá cleanTorrentName()
+// PŮVODNÍ toStream funkce s původním parserem - SPRÁVNĚ s kategorií vlevo
 async function toStream(t) {
     if (isMultiSeason(t.name)) {
         console.log(`[DEBUG] ❌ Preskakujem multi-season balík: '${t.name}'`);
@@ -211,15 +179,21 @@ async function toStream(t) {
     const flags = langMatches.map(code => langToFlag[code.toUpperCase()]).filter(Boolean);
     const flagsText = flags.length ? `\n${flags.join(" / ")}` : "";
 
-    // POUŽITÍ SPOLEČNÉ FUNKCE pro čištění názvu
-    const cleanedTitle = cleanTorrentName(t.name);
+    // PŮVODNÍ PARSER - přesně podle původního kódu
+    let cleanedTitle = t.name.replace(/^Stiahni si\s*/i, "").trim();
+    const categoryPrefix = t.category.trim().toLowerCase();
+    if (cleanedTitle.toLowerCase().startsWith(categoryPrefix)) {
+        cleanedTitle = cleanedTitle.slice(t.category.length).trim();
+    }
+
+    console.log(`[TORRENT PARSER] "${t.name}" + "${t.category}" → "${cleanedTitle}"`);
 
     const infoHash = await getInfoHashFromTorrent(t.downloadUrl);
     if (!infoHash) return null;
 
     return {
-        title: `${cleanedTitle}\n👤 ${t.seeds}  📀 ${t.size}  🩲 sktorrent.eu${flagsText}`,
-        name: `SKTorrent\n${t.category}`,
+        name: `SKTorrent\n${t.category}`, // <- KATEGORIE VLEVO
+        title: `${cleanedTitle}\n👤 ${t.seeds}  📀 ${t.size}  🩲 sktorrent.eu${flagsText}`, // <- ČISTÝ NÁZEV VPRAVO
         behaviorHints: { bingeGroup: cleanedTitle },
         infoHash
     };
@@ -229,7 +203,6 @@ async function toStream(t) {
 let addonBaseUrl = 'http://localhost:7000';
 const sessionKeys = new Map(); // Map pro ukládání API klíčů podle IP
 
-// OPRAVENÝ defineStreamHandler s správným předáváním API klíče a čištěním názvů
 builder.defineStreamHandler(async (args) => {
     const { type, id } = args;
     console.log(`\n====== 🎮 RAW Požiadavka: type='${type}', id='${id}' ======`);
@@ -285,7 +258,7 @@ builder.defineStreamHandler(async (args) => {
     // ============= PODMÍNĚNÉ ZOBRAZOVÁNÍ STREAMŮ PODLE STREAM_MODE =============
     console.log(`🎮 Stream mode: ${STREAM_MODE} - generating appropriate streams...`);
 
-    // Real-Debrid streamy (pokud je povolen a nakonfigurován)
+    // OPRAVENÉ Real-Debrid streamy s kategorií vlevo
     if (rd && (STREAM_MODE === "RD_ONLY" || STREAM_MODE === "BOTH")) {
         console.log('🚀 Preparing RD streams for user selection...');
 
@@ -304,23 +277,29 @@ builder.defineStreamHandler(async (args) => {
                 ? `${addonBaseUrl}/process/${infoHash}?api_key=${availableApiKey}`
                 : `${addonBaseUrl}/process/${infoHash}`;
 
-            console.log(`🔗 Generated process URL: ${processUrl.replace(availableApiKey || '', '***')}`);
+            // PŘESNĚ STEJNÝ PARSER JAKO V toStream()
+            let cleanedTitle = torrent.name.replace(/^Stiahni si\s*/i, "").trim();
+            const categoryPrefix = torrent.category.trim().toLowerCase();
+            if (cleanedTitle.toLowerCase().startsWith(categoryPrefix)) {
+                cleanedTitle = cleanedTitle.slice(torrent.category.length).trim();
+            }
 
-            // OPRAVENO: Použití cleanTorrentName() pro čištění názvu RD streamů
-            const cleanedTorrentName = cleanTorrentName(torrent.name);
+            console.log(`🔗 Generated process URL: ${processUrl.replace(availableApiKey || '', '***')}`);
+            console.log(`[RD PARSER] "${torrent.name}" + "${torrent.category}" → "${cleanedTitle}"`);
 
             streams.push({
-                name: `⚡ Real-Debrid - ${extractQuality(torrent.name)}`,
-                title: `${cleanedTorrentName}\n👤 ${torrent.seeds}  📀 ${torrent.size}  🔥 Click to process via RD`, // <- OPRAVENO
+                name: `RealDebrid\n${torrent.category}`, // <- Zkusit použít stejný formát jako SKTorrent
+                title: `${cleanedTitle}\n👤 ${torrent.seeds}  📀 ${torrent.size}  🔥 Click to process via RD`,
                 url: processUrl,
                 behaviorHints: {
                     bingeGroup: 'real-debrid-lazy'
                 }
             });
+
         }
     }
 
-    // Torrent streamy (pokud je povolen)
+    // Torrent streamy (pokud je povolen) - už správně implementováno v toStream()
     if (STREAM_MODE === "TORRENT_ONLY" || STREAM_MODE === "BOTH") {
         console.log('🎬 Generating torrent streams...');
         const originalStreams = (await Promise.all(torrents.map(toStream))).filter(Boolean);
@@ -544,7 +523,7 @@ app.get('/', (req, res) => {
         <body>
             <div class="container">
                 <h1>🔐 SKTorrent Hybrid Addon (Private)</h1>
-                <p class="subtitle">Secured addon - API key required - Mode: ${STREAM_MODE}</p>
+                <p class="subtitle">Fixed Categories + Real-Debrid + API security - Mode: ${STREAM_MODE}</p>
 
                 <div class="auth-section">
                     <h2>${hasApiKey ? '✅ Authenticated Access' : '🔒 Authentication Required'}</h2>
@@ -620,7 +599,7 @@ app.get('/', (req, res) => {
                 <hr>
 
                 <div class="footer">
-                    <p><strong>Powered by:</strong> Stremio Addon SDK + Real-Debrid API + Sktorrent.eu</p>
+                    <p><strong>Powered by:</strong> Fixed Categories Layout + Real-Debrid API + Security</p>
                     <p><small>Private addon - pouze pro autorizované uživatele</small></p>
                 </div>
             </div>
@@ -669,4 +648,5 @@ app.listen(7000, () => {
     console.log(`🔧 Mode: ${rd ? 'Hybrid (RD + Torrent)' : 'Torrent Only'}`);
     console.log(`🎮 Stream Mode: ${STREAM_MODE}`);
     console.log(`🔐 Security: ${ADDON_API_KEY ? 'API Key Protected' : 'UNSECURED - No API key set'}`);
+    console.log('✅ Categories positioned correctly (left side for both RD and torrent streams)');
 });
