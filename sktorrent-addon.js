@@ -15,7 +15,7 @@ const SKT_PASS = process.env.SKT_PASS || "";
 const ADDON_API_KEY = process.env.ADDON_API_KEY || "";
 
 // NOVÁ PROMĚNNÁ: Řízení zobrazování streamů
-const STREAM_MODE = process.env.STREAM_MODE || "BOTH"; // RD_ONLY, BOTH, TORRENT_ONLY
+const STREAM_MODE = process.env.STREAM_MODE || "RD_ONLY"; // RD_ONLY, BOTH, TORRENT_ONLY
 
 // Inicializace RD API
 const rd = process.env.REALDEBRID_API_KEY ?
@@ -35,12 +35,13 @@ if (ADDON_API_KEY) {
 
 console.log(`🎮 Stream mode: ${STREAM_MODE}`);
 
+// OPRAVENO: Správná doména sktorrent.eu
 const BASE_URL = "https://sktorrent.eu";
 const SEARCH_URL = `${BASE_URL}/torrent/torrents_v2.php`;
 
 const builder = addonBuilder({
     id: "org.stremio.sktorrent.hybrid.secure",
-    version: "1.5.0",
+    version: "1.5.1",
     name: `SKTorrent Hybrid (${STREAM_MODE})`,
     description: `Private Real-Debrid + Torrent addon with API key protection - Mode: ${STREAM_MODE}`,
     types: ["movie", "series"],
@@ -78,6 +79,38 @@ function extractQuality(title) {
     if (titleLower.includes('720p')) return '720p';
     if (titleLower.includes('480p')) return '480p';
     return 'SD';
+}
+
+// NOVÁ FUNKCE: Čištění názvu torrentu (použitelná pro RD i torrent streamy)
+function cleanTorrentName(torrentName) {
+    let cleanedTitle = torrentName;
+
+    console.log(`[CLEAN] Původní: "${cleanedTitle}"`);
+
+    // Odstranění konkrétních prefixů
+    cleanedTitle = cleanedTitle
+        .replace(/^Stiahni si Filmy s titulkama\s*/i, "")
+        .replace(/^Stiahni si Filmy bez titulků\s*/i, "")
+        .replace(/^Stiahni si Filmy\s*/i, "")
+        .replace(/^Stiahni si\s*/i, "")
+        .replace(/^Stahni si Filmy s titulkama\s*/i, "")
+        .replace(/^Stahni si Filmy bez titulků\s*/i, "")
+        .replace(/^Stahni si Filmy\s*/i, "")
+        .replace(/^Stahni si\s*/i, "")
+        .replace(/^(download|stahuj|stahnout)\s*/i, "")
+        .trim();
+
+    // Čištění separátorů na začátku
+    cleanedTitle = cleanedTitle.replace(/^[-:•·\s]+/, "").trim();
+
+    // Bezpečnostní kontrola
+    if (cleanedTitle.length < 2) {
+        cleanedTitle = torrentName;
+    }
+
+    console.log(`[CLEAN] Vyčištěný: "${cleanedTitle}"`);
+
+    return cleanedTitle;
 }
 
 async function getTitleFromIMDb(imdbId) {
@@ -168,6 +201,7 @@ async function getInfoHashFromTorrent(url) {
     }
 }
 
+// UPRAVENÁ toStream funkce - používá cleanTorrentName()
 async function toStream(t) {
     if (isMultiSeason(t.name)) {
         console.log(`[DEBUG] ❌ Preskakujem multi-season balík: '${t.name}'`);
@@ -177,22 +211,8 @@ async function toStream(t) {
     const flags = langMatches.map(code => langToFlag[code.toUpperCase()]).filter(Boolean);
     const flagsText = flags.length ? `\n${flags.join(" / ")}` : "";
 
-    // OPRAVENÉ ČIŠTĚNÍ NÁZVU - odstraní všechny možné prefixy
-    let cleanedTitle = t.name
-        .replace(/^(Stiahni si filmy s titulkami|Stahni si filmy s titulkama|Stiahni si seriály|Stiahni si|Stahni si)\s*/i, "")
-        .trim();
-    
-    // Odstranění kategorie z začátku názvu (pokud tam je)
-    const categoryPrefix = t.category.trim().toLowerCase();
-    if (cleanedTitle.toLowerCase().startsWith(categoryPrefix)) {
-        cleanedTitle = cleanedTitle.slice(t.category.length).trim();
-    }
-    
-    // Dodatečné čištění - odstranění běžných prefixů
-    cleanedTitle = cleanedTitle
-        .replace(/^(film|serial|movie|series)\s*[-:]\s*/i, "")
-        .replace(/^\s*[-:]\s*/, "")
-        .trim();
+    // POUŽITÍ SPOLEČNÉ FUNKCE pro čištění názvu
+    const cleanedTitle = cleanTorrentName(t.name);
 
     const infoHash = await getInfoHashFromTorrent(t.downloadUrl);
     if (!infoHash) return null;
@@ -209,6 +229,7 @@ async function toStream(t) {
 let addonBaseUrl = 'http://localhost:7000';
 const sessionKeys = new Map(); // Map pro ukládání API klíčů podle IP
 
+// OPRAVENÝ defineStreamHandler s správným předáváním API klíče a čištěním názvů
 builder.defineStreamHandler(async (args) => {
     const { type, id } = args;
     console.log(`\n====== 🎮 RAW Požiadavka: type='${type}', id='${id}' ======`);
@@ -269,19 +290,28 @@ builder.defineStreamHandler(async (args) => {
         console.log('🚀 Preparing RD streams for user selection...');
 
         const apiKeyFromArgs = args.extra && args.extra.api_key ? args.extra.api_key : null;
-        const storedApiKey = apiKeyFromArgs;
+        const allStoredKeys = Array.from(sessionKeys.values());
+        const fallbackApiKey = allStoredKeys.length > 0 ? allStoredKeys[0] : null;
+        const availableApiKey = apiKeyFromArgs || fallbackApiKey;
+
+        console.log(`🔑 Available API key for process URLs: ${availableApiKey ? availableApiKey.substring(0, 8) + '...' : 'NONE'}`);
 
         for (const torrent of torrents.slice(0, 5)) {
             const infoHash = await getInfoHashFromTorrent(torrent.downloadUrl);
             if (!infoHash) continue;
 
-            const processUrl = storedApiKey
-                ? `${addonBaseUrl}/process/${infoHash}?api_key=${storedApiKey}`
+            const processUrl = availableApiKey
+                ? `${addonBaseUrl}/process/${infoHash}?api_key=${availableApiKey}`
                 : `${addonBaseUrl}/process/${infoHash}`;
+
+            console.log(`🔗 Generated process URL: ${processUrl.replace(availableApiKey || '', '***')}`);
+
+            // OPRAVENO: Použití cleanTorrentName() pro čištění názvu RD streamů
+            const cleanedTorrentName = cleanTorrentName(torrent.name);
 
             streams.push({
                 name: `⚡ Real-Debrid - ${extractQuality(torrent.name)}`,
-                title: `${torrent.name}\n👤 ${torrent.seeds}  📀 ${torrent.size}  🔥 Click to process via RD`,
+                title: `${cleanedTorrentName}\n👤 ${torrent.seeds}  📀 ${torrent.size}  🔥 Click to process via RD`, // <- OPRAVENO
                 url: processUrl,
                 behaviorHints: {
                     bingeGroup: 'real-debrid-lazy'
@@ -313,11 +343,11 @@ builder.defineCatalogHandler(({ type, id }) => {
     return { metas: [] };
 });
 
-// ============= EXPRESS SERVER S SESSION-BASED API KLÍČEM =============
+// ============= EXPRESS SERVER S PŘÍSNOU API KLÍČ AUTENTIFIKACÍ =============
 const app = express();
 const rdProcessor = new RealDebridAPI(process.env.REALDEBRID_API_KEY);
 
-// Middleware pro session-based API klíč management
+// OPRAVENÝ middleware pro přísnou API klíč autentifikaci
 app.use((req, res, next) => {
     const clientIp = req.ip || req.connection.remoteAddress || 'unknown';
 
@@ -328,41 +358,56 @@ app.use((req, res, next) => {
         addonBaseUrl = `${req.protocol}://${req.get('host')}`;
     }
 
-    // Zachytit a uložit API klíč do session
+    console.log(`🔗 HTTP Request: ${req.method} ${req.url} - ${new Date().toISOString()}`);
+
+    // Pokud není nastaven API klíč, povolit vše (development mode)
+    if (!ADDON_API_KEY) {
+        console.log('⚠️ No API key configured - allowing unrestricted access (DEVELOPMENT MODE)');
+        return next();
+    }
+
+    console.log(`🔐 API key required for all requests`);
+
+    // Povolit pouze root path bez API klíče (pro zobrazení info stránky)
+    if (req.path === '/' && !req.query.api_key) {
+        console.log('ℹ️ Allowing root info page without API key');
+        return next();
+    }
+
+    // Získání API klíče z query nebo session storage
+    const apiKey = req.query.api_key || sessionKeys.get(clientIp);
+
+    if (!apiKey) {
+        console.log(`🚫 No API key provided from ${clientIp} for ${req.path}`);
+        return res.status(401).json({
+            error: 'Unauthorized - API key required',
+            message: 'Add ?api_key=YOUR_KEY to all requests',
+            path: req.path
+        });
+    }
+
+    if (apiKey !== ADDON_API_KEY) {
+        console.log(`🚫 Invalid API key from ${clientIp}: ${apiKey.substring(0, 8)}... for ${req.path}`);
+        return res.status(401).json({
+            error: 'Unauthorized - Invalid API key',
+            message: 'Provided API key is not valid'
+        });
+    }
+
+    console.log(`✅ API key authentication successful for ${clientIp} - ${req.path}`);
+
+    // VYLEPŠENÉ: Ukládat API klíč do session při každém úspěšném requestu
     if (req.query.api_key) {
         sessionKeys.set(clientIp, req.query.api_key);
         console.log(`🔑 API key stored for ${clientIp}: ${req.query.api_key.substring(0, 8)}...`);
     }
 
-    console.log(`🔗 HTTP Request: ${req.method} ${req.url} - ${new Date().toISOString()}`);
-
-    // API klíč autentifikace (pouze pokud je nastaven)
-    if (ADDON_API_KEY) {
-        // Povolit manifest pro instalaci
-        if (req.path === '/manifest.json') {
-            return next();
-        }
-
-        // Kontrola API klíče z query nebo session
-        const apiKey = req.query.api_key || sessionKeys.get(clientIp);
-        if (!apiKey || apiKey !== ADDON_API_KEY) {
-            console.log(`🚫 Unauthorized access from ${clientIp} - API key: ${apiKey ? 'invalid' : 'missing'}`);
-            return res.status(401).json({
-                error: 'Unauthorized - Valid API key required',
-                message: 'Add ?api_key=YOUR_KEY to the manifest URL'
-            });
-        }
-
-        console.log(`✅ API key authentication successful for ${clientIp}`);
-    }
-
     next();
 });
 
-// Root route - informační stránka s instrukcemi pro API klíč
+// Root route - informační stránka s bezpečnostními informacemi
 app.get('/', (req, res) => {
-    const clientIp = req.ip || req.connection.remoteAddress;
-    const hasApiKey = req.query.api_key === ADDON_API_KEY || sessionKeys.get(clientIp) === ADDON_API_KEY;
+    const hasApiKey = req.query.api_key === ADDON_API_KEY;
 
     res.send(`
         <!DOCTYPE html>
@@ -430,6 +475,10 @@ app.get('/', (req, res) => {
                 .install-button:hover {
                     transform: translateY(-2px);
                 }
+                .install-button:disabled {
+                    background: #ccc;
+                    cursor: not-allowed;
+                }
                 code {
                     background: #2d3748;
                     color: #68d391;
@@ -447,6 +496,15 @@ app.get('/', (req, res) => {
                     padding: 15px;
                     margin: 20px 0;
                     color: #9b2c2c;
+                }
+                .error {
+                    background: #fed7d7;
+                    border: 2px solid #fc8181;
+                    border-radius: 5px;
+                    padding: 20px;
+                    margin: 20px 0;
+                    color: #9b2c2c;
+                    font-weight: bold;
                 }
                 .success {
                     background: #c6f6d5;
@@ -486,32 +544,46 @@ app.get('/', (req, res) => {
         <body>
             <div class="container">
                 <h1>🔐 SKTorrent Hybrid Addon (Private)</h1>
-                <p class="subtitle">Secured Real-Debrid + Torrent addon - Mode: ${STREAM_MODE}</p>
+                <p class="subtitle">Secured addon - API key required - Mode: ${STREAM_MODE}</p>
 
                 <div class="auth-section">
-                    <h2>${hasApiKey ? '✅ Authenticated' : '🔒 Authentication Required'}</h2>
+                    <h2>${hasApiKey ? '✅ Authenticated Access' : '🔒 Authentication Required'}</h2>
                     ${hasApiKey ?
-                        '<div class="success">API klíč je platný - máte přístup k addonu</div>' :
-                        '<div class="warning">Pro přístup k addonu je vyžadován platný API klíč</div>'
+                        '<div class="success">✅ API klíč je platný - máte autentifikovaný přístup</div>' :
+                        ADDON_API_KEY ?
+                        '<div class="error">🚫 API klíč je vyžadován pro všechny funkce addonu. Bez platného API klíče nemáte přístup.</div>' :
+                        '<div class="warning">⚠️ Addon běží v DEVELOPMENT módu - žádné zabezpečení není aktivní</div>'
                     }
                 </div>
 
                 <div class="install-section">
                     <h2>📥 Instalace do Stremio</h2>
                     ${ADDON_API_KEY ? `
-                        <p>Pro instalaci tohoto chráněného addonu použijte URL s vašim API klíčem:</p>
+                        ${!hasApiKey ? `
+                            <div class="error">
+                                <h3>🔑 API klíč je povinný!</h3>
+                                <p>Tento addon vyžaduje platný API klíč pro všechny operace včetně instalace.</p>
+                                <p><strong>Bez API klíče addon nebude fungovat!</strong></p>
+                            </div>
+                        ` : ''}
+
+                        <p><strong>URL pro instalaci s API klíčem:</strong></p>
                         <code>${req.protocol}://${req.get('host')}/manifest.json?api_key=YOUR_API_KEY</code>
                         <br><br>
-                        <p><strong>Pozor:</strong> Nahraďte "YOUR_API_KEY" vaším skutečným API klíčem</p>
+                        <p><strong>⚠️ Důležité:</strong> Nahraďte "YOUR_API_KEY" vaším skutečným API klíčem</p>
+
                         ${hasApiKey ? `
                             <br>
-                            <a href="/manifest.json?api_key=${req.query.api_key || sessionKeys.get(clientIp)}" class="install-button">📋 Otevřit Manifest</a>
-                            <a href="stremio://${req.get('host')}/manifest.json?api_key=${req.query.api_key || sessionKeys.get(clientIp)}" class="install-button">⚡ Instalovat do Stremio</a>
-                        ` : ''}
+                            <a href="/manifest.json?api_key=${req.query.api_key}" class="install-button">📋 Otevřit Manifest</a>
+                            <a href="stremio://${req.get('host')}/manifest.json?api_key=${req.query.api_key}" class="install-button">⚡ Instalovat do Stremio</a>
+                        ` : `
+                            <br>
+                            <button class="install-button" disabled>🔒 Instalace vyžaduje API klíč</button>
+                        `}
                     ` : `
                         <div class="warning">
-                            <strong>API klíč není nakonfigurován!</strong><br>
-                            Addon je dostupný všem bez omezení. Nastavte ADDON_API_KEY v environment proměnných.
+                            <strong>DEVELOPMENT MODE</strong><br>
+                            API klíč není nakonfigurován. Addon je dostupný všem.
                         </div>
                         <code>${req.protocol}://${req.get('host')}/manifest.json</code>
                         <br><br>
@@ -521,6 +593,11 @@ app.get('/', (req, res) => {
 
                 <h2>🔧 Stav konfigurace</h2>
                 <div class="status-grid">
+                    <div class="status-card ${ADDON_API_KEY ? 'status-active' : 'status-inactive'}">
+                        <div class="emoji">${ADDON_API_KEY ? '🔐' : '⚠️'}</div>
+                        <h3>API Key Security</h3>
+                        <p>${ADDON_API_KEY ? 'Aktivní - addon je chráněný' : 'NENÍ NAKONFIGUROVÁNO - nezabezpečeno!'}</p>
+                    </div>
                     <div class="status-card ${rd ? 'status-active' : 'status-inactive'}">
                         <div class="emoji">${rd ? '✅' : '❌'}</div>
                         <h3>Real-Debrid</h3>
@@ -531,16 +608,11 @@ app.get('/', (req, res) => {
                         <h3>Sktorrent.eu</h3>
                         <p>${SKT_UID ? 'Přihlášení je aktivní' : 'Chybí přihlašovací údaje'}</p>
                     </div>
-                    <div class="status-card ${ADDON_API_KEY ? 'status-active' : 'status-inactive'}">
-                        <div class="emoji">${ADDON_API_KEY ? '🔐' : '⚠️'}</div>
-                        <h3>API Key Security</h3>
-                        <p>${ADDON_API_KEY ? 'Aktivní - addon je chráněný' : 'Není nakonfigurováno - nezabezpečeno'}</p>
-                    </div>
                     <div class="status-card ${STREAM_MODE === 'RD_ONLY' ? 'status-active' : STREAM_MODE === 'BOTH' ? 'status-warning' : 'status-inactive'}">
                         <div class="emoji">${STREAM_MODE === 'RD_ONLY' ? '⚡' : STREAM_MODE === 'BOTH' ? '🔄' : '🎬'}</div>
                         <h3>Stream Mode</h3>
-                        <p>${STREAM_MODE === 'RD_ONLY' ? 'Pouze Real-Debrid (s fallback)' : 
-                             STREAM_MODE === 'BOTH' ? 'RD + Torrent streamy' : 
+                        <p>${STREAM_MODE === 'RD_ONLY' ? 'Pouze Real-Debrid (s fallback)' :
+                             STREAM_MODE === 'BOTH' ? 'RD + Torrent streamy' :
                              'Pouze Torrent streamy'}</p>
                     </div>
                 </div>
@@ -557,12 +629,15 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Custom endpoint pro RD processing s automatickým fallbackem
+// Custom endpoint pro RD processing s debug informacemi a automatickým fallbackem
 app.get('/process/:infoHash', async (req, res) => {
     const { infoHash } = req.params;
+    const clientIp = req.ip || req.connection.remoteAddress || 'unknown';
 
     try {
         console.log(`🚀 User selected RD processing for: ${infoHash}`);
+        console.log(`🔑 Process endpoint - API key from query: ${req.query.api_key ? req.query.api_key.substring(0, 8) + '...' : 'NONE'}`);
+        console.log(`🔑 Process endpoint - API key from session: ${sessionKeys.get(clientIp) ? sessionKeys.get(clientIp).substring(0, 8) + '...' : 'NONE'}`);
 
         // Přidat do RD a čekat
         const magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
