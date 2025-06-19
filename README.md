@@ -11,7 +11,7 @@ Tento addon je vyvíjen na bázi původního [Sktorrent-Stremio-addon](https://g
 **SKTorrent Hybrid Addon** je pokročilá verze původního addonu, která kombinuje **Real-Debrid službu** s torrenty ze **[SKTorrent.eu](https://sktorrent.eu)** a poskytuje:
 
 * ⚡ **Real-Debrid integrace** s lazy loading processingem
-* 🎬 **Torrent streams** ze SKTorrent.eu jako fallback
+* 🎬 **Torrent streams** ze SKTorrent.eu
 * 🔐 **API klíč autentifikace** pro zabezpečení přístupu
 * 🎮 **Konfigurovatelné módy streamování** (RD\_ONLY, BOTH, TORRENT\_ONLY)
 * 🛡️ **IP bypass** - všechny requesty přes váš server
@@ -23,7 +23,6 @@ Tento addon je vyvíjen na bázi původního [Sktorrent-Stremio-addon](https://g
 
 * ✅ **Cache kontrola** - okamžité přehrání dostupného obsahu
 * ✅ **Lazy processing** - RD zpracování až po výběru streamu
-* ✅ **Automatický fallback** - při selhání RD přepne na torrent
 * ✅ **IP protection** - všechny RD požadavky přes váš server
 
 ### Sktorrent.eu Features
