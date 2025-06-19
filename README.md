@@ -78,7 +78,7 @@ SKT_PASS=your_sktorrent_pass_hash
 ADDON_API_KEY=skt_secure_api_key_123456789abcdef
 
 # Režim zobrazování streamů
-STREAM_MODE=RD_ONLY
+STREAM_MODE=BOTH
 
 # Produkční nastavení
 NODE_ENV=production
