@@ -597,23 +597,62 @@ app.get('/process/:infoHash', async (req, res) => {
     try {
         console.log(`🚀 Real-Debrid zpracování pro: ${infoHash}`);
 
-        // Vytvoření základního magnet linku
         const magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
-
-        // Rychlý pokus o RD zpracování (1 minuta)
-        const rdLinks = await rdProcessor.addMagnetAndWait(magnetLink, 1);
+        const rdLinks = await rdProcessor.addMagnetAndWait(magnetLink, 3); // Prodloužit timeout
 
         if (rdLinks && rdLinks.length > 0) {
-            console.log('✅ Real-Debrid zpracování úspěšné');
-            return res.redirect(302, rdLinks[0].url);
-        }
+            const rdUrl = rdLinks[0].url;
+            console.log(`✅ RD link získán, proxying přes server: ${rdUrl.substring(0, 50)}...`);
 
-        // Pokud RD selže, vrátit chybu (uživatel má k dispozici torrent stream)
-        console.log('⚠️ Real-Debrid zpracování se nezdařilo');
-        return res.status(503).json({
-            error: 'Real-Debrid zpracování se nezdařilo',
-            message: 'Zkuste Direct Torrent stream'
-        });
+            // PROXY STREAMING - stream jde přes váš server
+            try {
+                const response = await axios({
+                    method: 'GET',
+                    url: rdUrl,
+                    responseType: 'stream',
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0',
+                        'Range': req.headers.range || 'bytes=0-' // Support pro video seeking
+                    }
+                });
+
+                // Přenos hlaviček z RD serveru
+                Object.keys(response.headers).forEach(key => {
+                    if (key.toLowerCase() !== 'transfer-encoding') {
+                        res.set(key, response.headers[key]);
+                    }
+                });
+
+                // Nastavení správných hlaviček pro video streaming
+                res.set('Accept-Ranges', 'bytes');
+                res.set('Content-Type', response.headers['content-type'] || 'video/mp4');
+
+                console.log(`📡 Proxying stream - Content-Length: ${response.headers['content-length']}`);
+
+                // Pipe stream přes váš server
+                response.data.pipe(res);
+
+                response.data.on('error', (error) => {
+                    console.error(`❌ RD stream error: ${error.message}`);
+                    if (!res.headersSent) {
+                        res.status(500).end();
+                    }
+                });
+
+            } catch (proxyError) {
+                console.error(`❌ Proxy error: ${proxyError.message}`);
+                return res.status(503).json({
+                    error: 'Chyba při proxy streamování',
+                    message: 'Zkuste později'
+                });
+            }
+        } else {
+            console.log('⚠️ Real-Debrid zpracování se nezdařilo');
+            return res.status(503).json({
+                error: 'Real-Debrid zpracování se nezdařilo',
+                message: 'Zkuste Direct Torrent stream'
+            });
+        }
 
     } catch (error) {
         console.error(`❌ Chyba Real-Debrid: ${error.message}`);
