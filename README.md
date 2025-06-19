@@ -182,7 +182,6 @@ STREAM_MODE=RD_ONLY
 ```
 
 * ✅ Zobrazuje pouze ⚡ Real-Debrid streamy
-* ✅ Automatický fallback na torrent při selhání
 * ✅ Čistý interface bez duplicity
 * ✅ Optimální pro uživatele s Real-Debrid
 
