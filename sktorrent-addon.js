@@ -41,8 +41,8 @@ const SEARCH_URL = `${BASE_URL}/torrent/torrents_v2.php`;
 const builder = addonBuilder({
     id: "org.stremio.sktorrent.hybrid.dual",
     version: "2.0.0",
-    name: `SKTorrent Dual (${STREAM_MODE})`,
-    description: `Soukromý Real-Debrid + Torrent doplněk s duálním zobrazením - Režim: ${STREAM_MODE}`,
+    name: "SKTorrent Hybrid",
+    description: "Soukromý Real-Debrid + Torrent doplněk s ochranou API klíčem",
     types: ["movie", "series"],
     catalogs: [
         { type: "movie", id: "sktorrent-movie", name: "SKTorrent Filmy" },
@@ -362,7 +362,7 @@ app.get('/', (req, res) => {
         <!DOCTYPE html>
         <html>
         <head>
-            <title>SKTorrent Dual Addon (Soukromý)</title>
+            <title>SKTorrent Hybrid Addon (Soukromý)</title>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
@@ -500,8 +500,8 @@ app.get('/', (req, res) => {
         </head>
         <body>
             <div class="container">
-                <h1>🔐 SKTorrent Dual Addon</h1>
-                <p class="subtitle">Duální zobrazení streamů - Real-Debrid + Torrent současně - Režim: ${STREAM_MODE}</p>
+                <h1>🔐 SKTorrent Hybrid Addon</h1>
+                <p class="subtitle">Duální zobrazení streamů - Real-Debrid + Torrent současně</p>
 
                 <div class="feature-highlight">
                     <h3>🎯 Nová funkcionalita: Duální streamy</h3>
@@ -583,7 +583,6 @@ app.get('/', (req, res) => {
 
                 <div class="footer">
                     <p><strong>Powered by:</strong> Duální stream zobrazení + Real-Debrid API + Zabezpečení</p>
-                    <p><small>Verze 2.0 - bez fallback složitostí, čistý výběr streamů</small></p>
                 </div>
             </div>
         </body>
@@ -591,7 +590,7 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Zjednodušený endpoint pro Real-Debrid zpracování (bez fallback logiky)
+// Endpoint pro Real-Debrid zpracování
 app.get('/process/:infoHash', async (req, res) => {
     const { infoHash } = req.params;
 
@@ -631,10 +630,9 @@ app.use('/', addonRouter);
 
 // Spuštění serveru
 app.listen(7000, () => {
-    console.log('🚀 SKTorrent Dual doplněk běží na http://localhost:7000/manifest.json');
+    console.log('🚀 SKTorrent Hybrid doplněk běží na http://localhost:7000/manifest.json');
     console.log('🔧 RD Processor endpoint: /process/{infoHash}');
     console.log(`🔧 Režim: ${rd ? 'Dual (RD + Torrent)' : 'Pouze Torrent'}`);
     console.log(`🎮 Režim streamování: ${STREAM_MODE}`);
     console.log(`🔐 Zabezpečení: ${ADDON_API_KEY ? 'Chráněno API klíčem' : 'NEZABEZPEČENO - API klíč není nastaven'}`);
-    console.log('🎭 Duální zobrazení: Real-Debrid + Torrent streamy současně');
 });
