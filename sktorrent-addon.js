@@ -299,11 +299,16 @@ builder.defineCatalogHandler(({ type, id }) => {
 
 // Express server s API klíč autentifikací
 const app = express();
+app.set('trust proxy', true);
 const rdProcessor = new RealDebridAPI(process.env.REALDEBRID_API_KEY);
 
 // Middleware pro API klíč management
 app.use((req, res, next) => {
-    const clientIp = req.ip || req.connection.remoteAddress || 'unknown';
+    // ✅ OPRAVENO: Správné získání IP adresy přes proxy
+    const clientIp = req.ip || req.headers['x-real-ip'] || req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'unknown';
+
+    // Pokud je X-Forwarded-For seznam IP adres, vzít první (původní klient)
+    const realClientIp = clientIp.includes(',') ? clientIp.split(',')[0].trim() : clientIp;
 
     // Aktualizace base URL
     if (req.get('host') && req.get('x-forwarded-proto')) {
@@ -313,6 +318,7 @@ app.use((req, res, next) => {
     }
 
     console.log(`🔗 HTTP požadavek: ${req.method} ${req.url} - ${new Date().toISOString()}`);
+    console.log(`🌐 Návštěvník IP: ${realClientIp}`); // ✅ NOVÉ: Log skutečné IP
 
     // Pokud není nastaven API klíč, povolit vše (vývojový režim)
     if (!ADDON_API_KEY) {
@@ -328,32 +334,34 @@ app.use((req, res, next) => {
         return next();
     }
 
-    // Získání API klíče z query nebo session
-    const apiKey = req.query.api_key || sessionKeys.get(clientIp);
+    // Získání API klíče z query nebo session (používat skutečnou IP)
+    const apiKey = req.query.api_key || sessionKeys.get(realClientIp);
 
     if (!apiKey) {
-        console.log(`🚫 Žádný API klíč od ${clientIp} pro ${req.path}`);
+        console.log(`🚫 Žádný API klíč od ${realClientIp} pro ${req.path}`);
         return res.status(401).json({
             error: 'Neautorizovaný přístup - API klíč je vyžadován',
             message: 'Přidejte ?api_key=VÁŠ_KLÍČ ke všem požadavkům',
-            path: req.path
+            path: req.path,
+            clientIp: realClientIp // ✅ NOVÉ: Ukázat IP v odpovědi
         });
     }
 
     if (apiKey !== ADDON_API_KEY) {
-        console.log(`🚫 Neplatný API klíč od ${clientIp}: ${apiKey.substring(0, 8)}... pro ${req.path}`);
+        console.log(`🚫 Neplatný API klíč od ${realClientIp}: ${apiKey.substring(0, 8)}... pro ${req.path}`);
         return res.status(401).json({
             error: 'Neautorizovaný přístup - neplatný API klíč',
-            message: 'Poskytnutý API klíč není platný'
+            message: 'Poskytnutý API klíč není platný',
+            clientIp: realClientIp
         });
     }
 
-    console.log(`✅ Autentizace API klíče úspěšná pro ${clientIp} - ${req.path}`);
+    console.log(`✅ Autentizace API klíče úspěšná pro ${realClientIp} - ${req.path}`);
 
-    // Uložení API klíče do session
+    // Uložení API klíče do session (používat skutečnou IP)
     if (req.query.api_key) {
-        sessionKeys.set(clientIp, req.query.api_key);
-        console.log(`🔑 API klíč uložen pro ${clientIp}: ${req.query.api_key.substring(0, 8)}...`);
+        sessionKeys.set(realClientIp, req.query.api_key);
+        console.log(`🔑 API klíč uložen pro ${realClientIp}: ${req.query.api_key.substring(0, 8)}...`);
     }
 
     next();
