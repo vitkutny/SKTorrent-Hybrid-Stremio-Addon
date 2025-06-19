@@ -1,4 +1,4 @@
-// SKTorrent Stremio addon s pokročilým fallback systémom pre filmy a seriály
+// SKTorrent Stremio doplněk s duálním stream zobrazením (RD + Torrent)
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 const { decode } = require("entities");
 const axios = require("axios");
@@ -14,35 +14,35 @@ const SKT_UID = process.env.SKT_UID || "";
 const SKT_PASS = process.env.SKT_PASS || "";
 const ADDON_API_KEY = process.env.ADDON_API_KEY || "";
 
-// NOVÁ PROMĚNNÁ: Řízení zobrazování streamů
-const STREAM_MODE = process.env.STREAM_MODE || "RD_ONLY"; // RD_ONLY, BOTH, TORRENT_ONLY
+// Proměnná pro řízení zobrazování streamů
+const STREAM_MODE = process.env.STREAM_MODE || "BOTH"; // RD_ONLY, BOTH, TORRENT_ONLY
 
-// Inicializace RD API
+// Inicializace Real-Debrid API
 const rd = process.env.REALDEBRID_API_KEY ?
   new RealDebridAPI(process.env.REALDEBRID_API_KEY) : null;
 
 if (rd) {
-  console.log('🔧 Real-Debrid hybrid mode enabled');
+  console.log('🔧 Režim Real-Debrid hybrid aktivován');
 } else {
-  console.log('🔧 Running in torrent-only mode (set REALDEBRID_API_KEY for hybrid)');
+  console.log('🔧 Režim pouze torrent (nastavte REALDEBRID_API_KEY pro hybrid)');
 }
 
 if (ADDON_API_KEY) {
-  console.log('🔐 API key authentication enabled');
+  console.log('🔐 Autentizace pomocí API klíče aktivována');
 } else {
-  console.log('⚠️ Warning: No API key set - addon accessible to everyone');
+  console.log('⚠️ Varování: API klíč není nastaven - doplněk je přístupný všem');
 }
 
-console.log(`🎮 Stream mode: ${STREAM_MODE}`);
+console.log(`🎮 Režim streamování: ${STREAM_MODE}`);
 
 const BASE_URL = "https://sktorrent.eu";
 const SEARCH_URL = `${BASE_URL}/torrent/torrents_v2.php`;
 
 const builder = addonBuilder({
-    id: "org.stremio.sktorrent.hybrid.secure",
-    version: "1.5.3",
-    name: `SKTorrent Hybrid (${STREAM_MODE})`,
-    description: `Private Real-Debrid + Torrent addon with API key protection - Mode: ${STREAM_MODE}`,
+    id: "org.stremio.sktorrent.hybrid.dual",
+    version: "2.0.0",
+    name: `SKTorrent Dual (${STREAM_MODE})`,
+    description: `Soukromý Real-Debrid + Torrent doplněk s duálním zobrazením - Režim: ${STREAM_MODE}`,
     types: ["movie", "series"],
     catalogs: [
         { type: "movie", id: "sktorrent-movie", name: "SKTorrent Filmy" },
@@ -59,18 +59,22 @@ const langToFlag = {
     KR: "🇰🇷", CN: "🇨🇳"
 };
 
+// Funkce pro odstranění diakritiky z textu
 function removeDiacritics(str) {
     return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
+// Funkce pro zkrácení názvu na určitý počet slov
 function shortenTitle(title, wordCount = 3) {
     return title.split(/\s+/).slice(0, wordCount).join(" ");
 }
 
+// Funkce pro detekci multi-season balíku
 function isMultiSeason(title) {
     return /(S\d{2}E\d{2}-\d{2}|Complete|All Episodes|Season \d+(-\d+)?)/i.test(title);
 }
 
+// Funkce pro extrakci kvality z názvu
 function extractQuality(title) {
     const titleLower = title.toLowerCase();
     if (titleLower.includes('2160p') || titleLower.includes('4k')) return '4K';
@@ -80,6 +84,7 @@ function extractQuality(title) {
     return 'SD';
 }
 
+// Funkce pro získání názvu z IMDb
 async function getTitleFromIMDb(imdbId) {
     try {
         const res = await axios.get(`https://www.imdb.com/title/${imdbId}/`, {
@@ -97,18 +102,18 @@ async function getTitleFromIMDb(imdbId) {
                 if (json && json.name) originalTitle = decode(json.name.trim());
             } catch (e) {}
         }
-        console.log(`[DEBUG] 🌝 Lokalizovaný názov: ${title}`);
-        console.log(`[DEBUG] 🇳️ Originálny názov: ${originalTitle}`);
+        console.log(`[DEBUG] 🌝 Lokalizovaný název: ${title}`);
+        console.log(`[DEBUG] 🇳️ Originální název: ${originalTitle}`);
         return { title, originalTitle };
     } catch (err) {
-        console.error("[ERROR] IMDb scraping zlyhal:", err.message);
+        console.error("[ERROR] Chyba při získávání z IMDb:", err.message);
         return null;
     }
 }
 
-// PŮVODNÍ searchTorrents funkce (nezměněno)
+// Funkce pro vyhledávání torrentů na SKTorrent
 async function searchTorrents(query) {
-    console.log(`[INFO] 🔎 Hľadám '${query}' na SKTorrent...`);
+    console.log(`[INFO] 🔎 Hledám '${query}' na SKTorrent...`);
     try {
         const session = axios.create({
             headers: { Cookie: `uid=${SKT_UID}; pass=${SKT_PASS}` },
@@ -124,7 +129,7 @@ async function searchTorrents(query) {
             const outerTd = parent.closest("td");
             const fullBlock = outerTd.text().replace(/\s+/g, ' ').trim();
             const href = parent.attr("href") || "";
-            const tooltip = parent.attr("title") || ""; // PŮVODNÍ - používá tooltip
+            const tooltip = parent.attr("title") || "";
             const torrentId = href.split("id=").pop();
             const category = outerTd.find("b").first().text().trim();
             const sizeMatch = fullBlock.match(/Velkost\s([^|]+)/i);
@@ -133,7 +138,7 @@ async function searchTorrents(query) {
             const seeds = seedMatch ? seedMatch[1] : "0";
             if (!category.toLowerCase().includes("film") && !category.toLowerCase().includes("seri")) return;
             results.push({
-                name: tooltip, // PŮVODNÍ - používá tooltip
+                name: tooltip,
                 id: torrentId,
                 size,
                 seeds,
@@ -141,15 +146,16 @@ async function searchTorrents(query) {
                 downloadUrl: `${BASE_URL}/torrent/download.php?id=${torrentId}`
             });
         });
-        console.log(`[INFO] 📦 Nájdených torrentov: ${results.length}`);
+        console.log(`[INFO] 📦 Nalezeno torrentů: ${results.length}`);
         return results;
     } catch (err) {
-        console.error("[ERROR] Vyhľadávanie zlyhalo:", err.message);
+        console.error("[ERROR] Vyhledávání selhalo:", err.message);
         return [];
     }
 }
 
-async function getInfoHashFromTorrent(url) {
+// Funkce pro získání kompletních informací z torrent souboru
+async function getTorrentInfo(url) {
     try {
         const res = await axios.get(url, {
             responseType: "arraybuffer",
@@ -162,56 +168,31 @@ async function getInfoHashFromTorrent(url) {
         const torrent = bencode.decode(res.data);
         const info = bencode.encode(torrent.info);
         const infoHash = crypto.createHash("sha1").update(info).digest("hex");
-        return infoHash;
+
+        return {
+            infoHash,
+            name: torrent.info.name ? torrent.info.name.toString() : ''
+        };
     } catch (err) {
-        console.error("[ERROR] ⛔️ Chyba pri spracovaní .torrent:", err.message);
+        console.error("[ERROR] Chyba při zpracování .torrent:", err.message);
         return null;
     }
-}
-
-// PŮVODNÍ toStream funkce s původním parserem - SPRÁVNĚ s kategorií vlevo
-async function toStream(t) {
-    if (isMultiSeason(t.name)) {
-        console.log(`[DEBUG] ❌ Preskakujem multi-season balík: '${t.name}'`);
-        return null;
-    }
-    const langMatches = t.name.match(/\b([A-Z]{2})\b/g) || [];
-    const flags = langMatches.map(code => langToFlag[code.toUpperCase()]).filter(Boolean);
-    const flagsText = flags.length ? `\n${flags.join(" / ")}` : "";
-
-    // PŮVODNÍ PARSER - přesně podle původního kódu
-    let cleanedTitle = t.name.replace(/^Stiahni si\s*/i, "").trim();
-    const categoryPrefix = t.category.trim().toLowerCase();
-    if (cleanedTitle.toLowerCase().startsWith(categoryPrefix)) {
-        cleanedTitle = cleanedTitle.slice(t.category.length).trim();
-    }
-
-    console.log(`[TORRENT PARSER] "${t.name}" + "${t.category}" → "${cleanedTitle}"`);
-
-    const infoHash = await getInfoHashFromTorrent(t.downloadUrl);
-    if (!infoHash) return null;
-
-    return {
-        name: `SKTorrent\n${t.category}`, // <- KATEGORIE VLEVO
-        title: `${cleanedTitle}\n👤 ${t.seeds}  📀 ${t.size}  🩲 sktorrent.eu${flagsText}`, // <- ČISTÝ NÁZEV VPRAVO
-        behaviorHints: { bingeGroup: cleanedTitle },
-        infoHash
-    };
 }
 
 // Globální proměnné
 let addonBaseUrl = 'http://localhost:7000';
-const sessionKeys = new Map(); // Map pro ukládání API klíčů podle IP
+const sessionKeys = new Map();
 
+// Definice stream handleru s duálním zobrazením
 builder.defineStreamHandler(async (args) => {
     const { type, id } = args;
-    console.log(`\n====== 🎮 RAW Požiadavka: type='${type}', id='${id}' ======`);
+    console.log(`\n====== 🎮 RAW Požadavek: type='${type}', id='${id}' ======`);
 
     const [imdbId, sRaw, eRaw] = id.split(":");
     const season = sRaw ? parseInt(sRaw) : undefined;
     const episode = eRaw ? parseInt(eRaw) : undefined;
 
-    console.log(`====== 🎮 STREAM Požiadavka pre typ='${type}' imdbId='${imdbId}' season='${season}' episode='${episode}' ======`);
+    console.log(`====== 🎮 STREAM Požadavek pro typ='${type}' imdbId='${imdbId}' season='${season}' episode='${episode}' ======`);
 
     const titles = await getTitleFromIMDb(imdbId);
     if (!titles) return { streams: [] };
@@ -243,148 +224,137 @@ builder.defineStreamHandler(async (args) => {
     let torrents = [];
     let attempt = 1;
     for (const q of queries) {
-        console.log(`[DEBUG] 🔍 Pokus ${attempt++}: Hľadám '${q}'`);
+        console.log(`[DEBUG] 🔍 Pokus ${attempt++}: Hledám '${q}'`);
         torrents = await searchTorrents(q);
         if (torrents.length > 0) break;
     }
 
     if (torrents.length === 0) {
-        console.log(`[INFO] ❌ Žiadne torrenty nenájdené`);
+        console.log(`[INFO] ❌ Žádné torrenty nenalezeny`);
         return { streams: [] };
     }
 
     const streams = [];
+    console.log(`🎮 Režim streamování: ${STREAM_MODE} - generuji duální streamy...`);
 
-    // ============= PODMÍNĚNÉ ZOBRAZOVÁNÍ STREAMŮ PODLE STREAM_MODE =============
-    console.log(`🎮 Stream mode: ${STREAM_MODE} - generating appropriate streams...`);
+    // Zpracování torrentů pro duální zobrazení
+    const apiKeyFromArgs = args.extra && args.extra.api_key ? args.extra.api_key : null;
+    const allStoredKeys = Array.from(sessionKeys.values());
+    const fallbackApiKey = allStoredKeys.length > 0 ? allStoredKeys[0] : null;
+    const availableApiKey = apiKeyFromArgs || fallbackApiKey;
 
-    // OPRAVENÉ Real-Debrid streamy s kategorií vlevo
-    if (rd && (STREAM_MODE === "RD_ONLY" || STREAM_MODE === "BOTH")) {
-        console.log('🚀 Preparing RD streams for user selection...');
+    for (const torrent of torrents.slice(0, 5)) {
+        const torrentInfo = await getTorrentInfo(torrent.downloadUrl);
+        if (!torrentInfo) continue;
 
-        const apiKeyFromArgs = args.extra && args.extra.api_key ? args.extra.api_key : null;
-        const allStoredKeys = Array.from(sessionKeys.values());
-        const fallbackApiKey = allStoredKeys.length > 0 ? allStoredKeys[0] : null;
-        const availableApiKey = apiKeyFromArgs || fallbackApiKey;
+        // Společný parser pro názvy
+        let cleanedTitle = torrent.name.replace(/^Stiahni si\s*/i, "").trim();
+        const categoryPrefix = torrent.category.trim().toLowerCase();
+        if (cleanedTitle.toLowerCase().startsWith(categoryPrefix)) {
+            cleanedTitle = cleanedTitle.slice(torrent.category.length).trim();
+        }
 
-        console.log(`🔑 Available API key for process URLs: ${availableApiKey ? availableApiKey.substring(0, 8) + '...' : 'NONE'}`);
+        const langMatches = torrent.name.match(/\b([A-Z]{2})\b/g) || [];
+        const flags = langMatches.map(code => langToFlag[code.toUpperCase()]).filter(Boolean);
+        const flagsText = flags.length ? `\n${flags.join(" / ")}` : "";
 
-        for (const torrent of torrents.slice(0, 5)) {
-            const infoHash = await getInfoHashFromTorrent(torrent.downloadUrl);
-            if (!infoHash) continue;
-
+        // 1. Real-Debrid stream (pokud je povolený)
+        if (rd && (STREAM_MODE === "RD_ONLY" || STREAM_MODE === "BOTH")) {
             const processUrl = availableApiKey
-                ? `${addonBaseUrl}/process/${infoHash}?api_key=${availableApiKey}`
-                : `${addonBaseUrl}/process/${infoHash}`;
-
-            // PŘESNĚ STEJNÝ PARSER JAKO V toStream()
-            let cleanedTitle = torrent.name.replace(/^Stiahni si\s*/i, "").trim();
-            const categoryPrefix = torrent.category.trim().toLowerCase();
-            if (cleanedTitle.toLowerCase().startsWith(categoryPrefix)) {
-                cleanedTitle = cleanedTitle.slice(torrent.category.length).trim();
-            }
-
-            console.log(`🔗 Generated process URL: ${processUrl.replace(availableApiKey || '', '***')}`);
-            console.log(`[RD PARSER] "${torrent.name}" + "${torrent.category}" → "${cleanedTitle}"`);
+                ? `${addonBaseUrl}/process/${torrentInfo.infoHash}?api_key=${availableApiKey}`
+                : `${addonBaseUrl}/process/${torrentInfo.infoHash}`;
 
             streams.push({
-                name: `RealDebrid\n${torrent.category}`, // <- Zkusit použít stejný formát jako SKTorrent
-                title: `${cleanedTitle}\n👤 ${torrent.seeds}  📀 ${torrent.size}  🔥 Click to process via RD`,
+                name: `⚡ Real-Debrid\n${torrent.category}`,
+                title: `${cleanedTitle}\n👤 ${torrent.seeds}  📀 ${torrent.size}  🚀 Rychlé přehrání${flagsText}`,
                 url: processUrl,
-                behaviorHints: {
-                    bingeGroup: 'real-debrid-lazy'
-                }
+                behaviorHints: { bingeGroup: `rd-${cleanedTitle}` }
             });
+        }
 
+        // 2. Direct Torrent stream (pokud je povolený)
+        if (STREAM_MODE === "TORRENT_ONLY" || STREAM_MODE === "BOTH") {
+            streams.push({
+                name: `🎬 Direct Torrent\n${torrent.category}`,
+                title: `${cleanedTitle}\n👤 ${torrent.seeds}  📀 ${torrent.size}  💾 Přímé stahování${flagsText}`,
+                infoHash: torrentInfo.infoHash,
+                behaviorHints: { bingeGroup: `torrent-${cleanedTitle}` }
+            });
         }
     }
 
-    // Torrent streamy (pokud je povolen) - už správně implementováno v toStream()
-    if (STREAM_MODE === "TORRENT_ONLY" || STREAM_MODE === "BOTH") {
-        console.log('🎬 Generating torrent streams...');
-        const originalStreams = (await Promise.all(torrents.map(toStream))).filter(Boolean);
-        streams.push(...originalStreams);
-    }
-
-    // Pokud je RD_ONLY mode a RD není dostupný, přidat torrent streamy jako fallback
-    if (STREAM_MODE === "RD_ONLY" && !rd) {
-        console.log('⚠️ RD_ONLY mode but Real-Debrid not available - adding torrent fallback');
-        const fallbackStreams = (await Promise.all(torrents.map(toStream))).filter(Boolean);
-        streams.push(...fallbackStreams);
-    }
-
-    console.log(`[INFO] ✅ Odosielam ${streams.length} streamov do Stremio (Mode: ${STREAM_MODE})`);
+    console.log(`[INFO] ✅ Odesílám ${streams.length} streamů do Stremio (Režim: ${STREAM_MODE})`);
     return { streams };
 });
 
 builder.defineCatalogHandler(({ type, id }) => {
-    console.log(`[DEBUG] 📚 Katalóg požiadavka pre typ='${type}' id='${id}'`);
+    console.log(`[DEBUG] 📚 Požadavek na katalog pro typ='${type}' id='${id}'`);
     return { metas: [] };
 });
 
-// ============= EXPRESS SERVER S PŘÍSNOU API KLÍČ AUTENTIFIKACÍ =============
+// Express server s API klíč autentifikací
 const app = express();
 const rdProcessor = new RealDebridAPI(process.env.REALDEBRID_API_KEY);
 
-// OPRAVENÝ middleware pro přísnou API klíč autentifikaci
+// Middleware pro API klíč management
 app.use((req, res, next) => {
     const clientIp = req.ip || req.connection.remoteAddress || 'unknown';
 
-    // Aktualizovat base URL
+    // Aktualizace base URL
     if (req.get('host') && req.get('x-forwarded-proto')) {
         addonBaseUrl = `${req.get('x-forwarded-proto')}://${req.get('host')}`;
     } else if (req.get('host')) {
         addonBaseUrl = `${req.protocol}://${req.get('host')}`;
     }
 
-    console.log(`🔗 HTTP Request: ${req.method} ${req.url} - ${new Date().toISOString()}`);
+    console.log(`🔗 HTTP požadavek: ${req.method} ${req.url} - ${new Date().toISOString()}`);
 
-    // Pokud není nastaven API klíč, povolit vše (development mode)
+    // Pokud není nastaven API klíč, povolit vše (vývojový režim)
     if (!ADDON_API_KEY) {
-        console.log('⚠️ No API key configured - allowing unrestricted access (DEVELOPMENT MODE)');
+        console.log('⚠️ API klíč není nastaven - povolen neomezený přístup (vývojový režim)');
         return next();
     }
 
-    console.log(`🔐 API key required for all requests`);
+    console.log('🔐 API klíč je vyžadován pro všechny požadavky');
 
-    // Povolit pouze root path bez API klíče (pro zobrazení info stránky)
+    // Povolit pouze úvodní stránku bez API klíče
     if (req.path === '/' && !req.query.api_key) {
-        console.log('ℹ️ Allowing root info page without API key');
+        console.log('ℹ️ Povolen přístup na úvodní stránku bez API klíče');
         return next();
     }
 
-    // Získání API klíče z query nebo session storage
+    // Získání API klíče z query nebo session
     const apiKey = req.query.api_key || sessionKeys.get(clientIp);
 
     if (!apiKey) {
-        console.log(`🚫 No API key provided from ${clientIp} for ${req.path}`);
+        console.log(`🚫 Žádný API klíč od ${clientIp} pro ${req.path}`);
         return res.status(401).json({
-            error: 'Unauthorized - API key required',
-            message: 'Add ?api_key=YOUR_KEY to all requests',
+            error: 'Neautorizovaný přístup - API klíč je vyžadován',
+            message: 'Přidejte ?api_key=VÁŠ_KLÍČ ke všem požadavkům',
             path: req.path
         });
     }
 
     if (apiKey !== ADDON_API_KEY) {
-        console.log(`🚫 Invalid API key from ${clientIp}: ${apiKey.substring(0, 8)}... for ${req.path}`);
+        console.log(`🚫 Neplatný API klíč od ${clientIp}: ${apiKey.substring(0, 8)}... pro ${req.path}`);
         return res.status(401).json({
-            error: 'Unauthorized - Invalid API key',
-            message: 'Provided API key is not valid'
+            error: 'Neautorizovaný přístup - neplatný API klíč',
+            message: 'Poskytnutý API klíč není platný'
         });
     }
 
-    console.log(`✅ API key authentication successful for ${clientIp} - ${req.path}`);
+    console.log(`✅ Autentizace API klíče úspěšná pro ${clientIp} - ${req.path}`);
 
-    // VYLEPŠENÉ: Ukládat API klíč do session při každém úspěšném requestu
+    // Uložení API klíče do session
     if (req.query.api_key) {
         sessionKeys.set(clientIp, req.query.api_key);
-        console.log(`🔑 API key stored for ${clientIp}: ${req.query.api_key.substring(0, 8)}...`);
+        console.log(`🔑 API klíč uložen pro ${clientIp}: ${req.query.api_key.substring(0, 8)}...`);
     }
 
     next();
 });
 
-// Root route - informační stránka s bezpečnostními informacemi
+// Úvodní stránka
 app.get('/', (req, res) => {
     const hasApiKey = req.query.api_key === ADDON_API_KEY;
 
@@ -392,7 +362,7 @@ app.get('/', (req, res) => {
         <!DOCTYPE html>
         <html>
         <head>
-            <title>SKTorrent Hybrid Addon (Private)</title>
+            <title>SKTorrent Dual Addon (Soukromý)</title>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
@@ -422,6 +392,14 @@ app.get('/', (req, res) => {
                     color: #718096;
                     font-size: 1.2em;
                     margin-bottom: 40px;
+                }
+                .feature-highlight {
+                    background: #e6fffa;
+                    border: 2px solid #38b2ac;
+                    border-radius: 10px;
+                    padding: 20px;
+                    margin: 20px 0;
+                    text-align: center;
                 }
                 .auth-section {
                     background: ${hasApiKey ? '#f0fff4' : '#fffaf0'};
@@ -522,16 +500,23 @@ app.get('/', (req, res) => {
         </head>
         <body>
             <div class="container">
-                <h1>🔐 SKTorrent Hybrid Addon (Private)</h1>
-                <p class="subtitle">Fixed Categories + Real-Debrid + API security - Mode: ${STREAM_MODE}</p>
+                <h1>🔐 SKTorrent Dual Addon</h1>
+                <p class="subtitle">Duální zobrazení streamů - Real-Debrid + Torrent současně - Režim: ${STREAM_MODE}</p>
+
+                <div class="feature-highlight">
+                    <h3>🎯 Nová funkcionalita: Duální streamy</h3>
+                    <p>✅ Zobrazuje Real-Debrid i Torrent streamy současně<br>
+                    ✅ Žádné čekání na timeout - okamžitý výběr<br>
+                    ✅ Uživatel si vybere preferovanou metodu</p>
+                </div>
 
                 <div class="auth-section">
-                    <h2>${hasApiKey ? '✅ Authenticated Access' : '🔒 Authentication Required'}</h2>
+                    <h2>${hasApiKey ? '✅ Autentizovaný přístup' : '🔒 Vyžadována autentizace'}</h2>
                     ${hasApiKey ?
-                        '<div class="success">✅ API klíč je platný - máte autentifikovaný přístup</div>' :
+                        '<div class="success">✅ API klíč je platný - máte přístup</div>' :
                         ADDON_API_KEY ?
-                        '<div class="error">🚫 API klíč je vyžadován pro všechny funkce addonu. Bez platného API klíče nemáte přístup.</div>' :
-                        '<div class="warning">⚠️ Addon běží v DEVELOPMENT módu - žádné zabezpečení není aktivní</div>'
+                        '<div class="error">🚫 API klíč je vyžadován pro všechny funkce. Bez platného klíče není přístup.</div>' :
+                        '<div class="warning">⚠️ Doplněk běží v režimu vývoje - bez zabezpečení</div>'
                     }
                 </div>
 
@@ -541,19 +526,19 @@ app.get('/', (req, res) => {
                         ${!hasApiKey ? `
                             <div class="error">
                                 <h3>🔑 API klíč je povinný!</h3>
-                                <p>Tento addon vyžaduje platný API klíč pro všechny operace včetně instalace.</p>
-                                <p><strong>Bez API klíče addon nebude fungovat!</strong></p>
+                                <p>Doplněk vyžaduje platný API klíč pro všechny operace včetně instalace.</p>
+                                <p><strong>Bez API klíče doplněk nebude fungovat!</strong></p>
                             </div>
                         ` : ''}
 
                         <p><strong>URL pro instalaci s API klíčem:</strong></p>
-                        <code>${req.protocol}://${req.get('host')}/manifest.json?api_key=YOUR_API_KEY</code>
+                        <code>${req.protocol}://${req.get('host')}/manifest.json?api_key=VÁŠ_KLÍČ</code>
                         <br><br>
-                        <p><strong>⚠️ Důležité:</strong> Nahraďte "YOUR_API_KEY" vaším skutečným API klíčem</p>
+                        <p><strong>⚠️ Důležité:</strong> Nahraďte "VÁŠ_KLÍČ" vaším skutečným API klíčem</p>
 
                         ${hasApiKey ? `
                             <br>
-                            <a href="/manifest.json?api_key=${req.query.api_key}" class="install-button">📋 Otevřit Manifest</a>
+                            <a href="/manifest.json?api_key=${req.query.api_key}" class="install-button">📋 Otevřít manifest</a>
                             <a href="stremio://${req.get('host')}/manifest.json?api_key=${req.query.api_key}" class="install-button">⚡ Instalovat do Stremio</a>
                         ` : `
                             <br>
@@ -561,12 +546,12 @@ app.get('/', (req, res) => {
                         `}
                     ` : `
                         <div class="warning">
-                            <strong>DEVELOPMENT MODE</strong><br>
-                            API klíč není nakonfigurován. Addon je dostupný všem.
+                            <strong>REŽIM VÝVOJE</strong><br>
+                            API klíč není nastaven. Doplněk je přístupný všem.
                         </div>
                         <code>${req.protocol}://${req.get('host')}/manifest.json</code>
                         <br><br>
-                        <a href="/manifest.json" class="install-button">📋 Otevřit Manifest</a>
+                        <a href="/manifest.json" class="install-button">📋 Otevřít manifest</a>
                     `}
                 </div>
 
@@ -575,7 +560,7 @@ app.get('/', (req, res) => {
                     <div class="status-card ${ADDON_API_KEY ? 'status-active' : 'status-inactive'}">
                         <div class="emoji">${ADDON_API_KEY ? '🔐' : '⚠️'}</div>
                         <h3>API Key Security</h3>
-                        <p>${ADDON_API_KEY ? 'Aktivní - addon je chráněný' : 'NENÍ NAKONFIGUROVÁNO - nezabezpečeno!'}</p>
+                        <p>${ADDON_API_KEY ? 'Aktivní - doplněk je chráněný' : 'NENÍ NASTAVENO - nezabezpečeno!'}</p>
                     </div>
                     <div class="status-card ${rd ? 'status-active' : 'status-inactive'}">
                         <div class="emoji">${rd ? '✅' : '❌'}</div>
@@ -584,23 +569,21 @@ app.get('/', (req, res) => {
                     </div>
                     <div class="status-card ${SKT_UID ? 'status-active' : 'status-inactive'}">
                         <div class="emoji">${SKT_UID ? '✅' : '❌'}</div>
-                        <h3>Sktorrent.eu</h3>
-                        <p>${SKT_UID ? 'Přihlášení je aktivní' : 'Chybí přihlašovací údaje'}</p>
+                        <h3>SKTorrent.eu</h3>
+                        <p>${SKT_UID ? 'Přihlášení aktivní' : 'Chybí přihlašovací údaje'}</p>
                     </div>
-                    <div class="status-card ${STREAM_MODE === 'RD_ONLY' ? 'status-active' : STREAM_MODE === 'BOTH' ? 'status-warning' : 'status-inactive'}">
-                        <div class="emoji">${STREAM_MODE === 'RD_ONLY' ? '⚡' : STREAM_MODE === 'BOTH' ? '🔄' : '🎬'}</div>
-                        <h3>Stream Mode</h3>
-                        <p>${STREAM_MODE === 'RD_ONLY' ? 'Pouze Real-Debrid (s fallback)' :
-                             STREAM_MODE === 'BOTH' ? 'RD + Torrent streamy' :
-                             'Pouze Torrent streamy'}</p>
+                    <div class="status-card status-active">
+                        <div class="emoji">🎭</div>
+                        <h3>Duální zobrazení</h3>
+                        <p>Aktivní - RD + Torrent současně</p>
                     </div>
                 </div>
 
                 <hr>
 
                 <div class="footer">
-                    <p><strong>Powered by:</strong> Fixed Categories Layout + Real-Debrid API + Security</p>
-                    <p><small>Private addon - pouze pro autorizované uživatele</small></p>
+                    <p><strong>Powered by:</strong> Duální stream zobrazení + Real-Debrid API + Zabezpečení</p>
+                    <p><small>Verze 2.0 - bez fallback složitostí, čistý výběr streamů</small></p>
                 </div>
             </div>
         </body>
@@ -608,45 +591,50 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Custom endpoint pro RD processing s debug informacemi a automatickým fallbackem
+// Zjednodušený endpoint pro Real-Debrid zpracování (bez fallback logiky)
 app.get('/process/:infoHash', async (req, res) => {
     const { infoHash } = req.params;
-    const clientIp = req.ip || req.connection.remoteAddress || 'unknown';
 
     try {
-        console.log(`🚀 User selected RD processing for: ${infoHash}`);
-        console.log(`🔑 Process endpoint - API key from query: ${req.query.api_key ? req.query.api_key.substring(0, 8) + '...' : 'NONE'}`);
-        console.log(`🔑 Process endpoint - API key from session: ${sessionKeys.get(clientIp) ? sessionKeys.get(clientIp).substring(0, 8) + '...' : 'NONE'}`);
+        console.log(`🚀 Real-Debrid zpracování pro: ${infoHash}`);
 
-        // Přidat do RD a čekat
+        // Vytvoření základního magnet linku
         const magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
-        const rdLinks = await rdProcessor.addMagnetAndWait(magnetLink, 2);
+
+        // Rychlý pokus o RD zpracování (1 minuta)
+        const rdLinks = await rdProcessor.addMagnetAndWait(magnetLink, 1);
 
         if (rdLinks && rdLinks.length > 0) {
-            console.log('✅ RD download completed - using direct link');
+            console.log('✅ Real-Debrid zpracování úspěšné');
             return res.redirect(302, rdLinks[0].url);
         }
 
-        // Automatický fallback na magnet (pro RD_ONLY mode)
-        console.log('⚠️ RD failed - redirecting to magnet (automatic fallback)');
-        res.redirect(302, magnetLink);
+        // Pokud RD selže, vrátit chybu (uživatel má k dispozici torrent stream)
+        console.log('⚠️ Real-Debrid zpracování se nezdařilo');
+        return res.status(503).json({
+            error: 'Real-Debrid zpracování se nezdařilo',
+            message: 'Zkuste Direct Torrent stream'
+        });
 
     } catch (error) {
-        console.error(`❌ RD processing failed: ${error.message}`);
-        res.redirect(302, `magnet:?xt=urn:btih:${infoHash}`);
+        console.error(`❌ Chyba Real-Debrid: ${error.message}`);
+        return res.status(503).json({
+            error: 'Chyba Real-Debrid serveru',
+            message: 'Zkuste Direct Torrent stream'
+        });
     }
 });
 
-// Převést addon na Express router a použít
+// Převod addon na Express router
 const addonRouter = getRouter(builder.getInterface());
 app.use('/', addonRouter);
 
-// Spustit server
+// Spuštění serveru
 app.listen(7000, () => {
-    console.log('🚀 SKTorrent Hybrid addon běží na http://localhost:7000/manifest.json');
+    console.log('🚀 SKTorrent Dual doplněk běží na http://localhost:7000/manifest.json');
     console.log('🔧 RD Processor endpoint: /process/{infoHash}');
-    console.log(`🔧 Mode: ${rd ? 'Hybrid (RD + Torrent)' : 'Torrent Only'}`);
-    console.log(`🎮 Stream Mode: ${STREAM_MODE}`);
-    console.log(`🔐 Security: ${ADDON_API_KEY ? 'API Key Protected' : 'UNSECURED - No API key set'}`);
-    console.log('✅ Categories positioned correctly (left side for both RD and torrent streams)');
+    console.log(`🔧 Režim: ${rd ? 'Dual (RD + Torrent)' : 'Pouze Torrent'}`);
+    console.log(`🎮 Režim streamování: ${STREAM_MODE}`);
+    console.log(`🔐 Zabezpečení: ${ADDON_API_KEY ? 'Chráněno API klíčem' : 'NEZABEZPEČENO - API klíč není nastaven'}`);
+    console.log('🎭 Duální zobrazení: Real-Debrid + Torrent streamy současně');
 });
