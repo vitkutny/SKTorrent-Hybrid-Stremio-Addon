@@ -183,6 +183,11 @@ async function getTorrentInfo(url) {
 let addonBaseUrl = 'http://localhost:7000';
 const sessionKeys = new Map();
 
+// Cache a tracking pro RD optimalizaci
+const activeProcessing = new Map(); // infoHash -> Promise
+const rdCache = new Map(); // infoHash -> {timestamp, links, expiresAt}
+const CACHE_DURATION = 10 * 60 * 1000; // 10 minut cache
+
 // Definice stream handleru s duálním zobrazením
 builder.defineStreamHandler(async (args) => {
     const { type, id } = args;
@@ -590,78 +595,97 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Endpoint pro Real-Debrid zpracování
+// Optimalizovaný endpoint pro Real-Debrid zpracování s cache a prevencí duplicit
 app.get('/process/:infoHash', async (req, res) => {
     const { infoHash } = req.params;
+    const now = Date.now();
 
     try {
-        console.log(`🚀 Real-Debrid zpracování pro: ${infoHash}`);
+        console.log(`🚀 Real-Debrid požadavek pro: ${infoHash}`);
 
-        const magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
-        const rdLinks = await rdProcessor.addMagnetAndWait(magnetLink, 3); // Prodloužit timeout
-
-        if (rdLinks && rdLinks.length > 0) {
-            const rdUrl = rdLinks[0].url;
-            console.log(`✅ RD link získán, proxying přes server: ${rdUrl.substring(0, 50)}...`);
-
-            // PROXY STREAMING - stream jde přes váš server
-            try {
-                const response = await axios({
-                    method: 'GET',
-                    url: rdUrl,
-                    responseType: 'stream',
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0',
-                        'Range': req.headers.range || 'bytes=0-' // Support pro video seeking
-                    }
-                });
-
-                // Přenos hlaviček z RD serveru
-                Object.keys(response.headers).forEach(key => {
-                    if (key.toLowerCase() !== 'transfer-encoding') {
-                        res.set(key, response.headers[key]);
-                    }
-                });
-
-                // Nastavení správných hlaviček pro video streaming
-                res.set('Accept-Ranges', 'bytes');
-                res.set('Content-Type', response.headers['content-type'] || 'video/mp4');
-
-                console.log(`📡 Proxying stream - Content-Length: ${response.headers['content-length']}`);
-
-                // Pipe stream přes váš server
-                response.data.pipe(res);
-
-                response.data.on('error', (error) => {
-                    console.error(`❌ RD stream error: ${error.message}`);
-                    if (!res.headersSent) {
-                        res.status(500).end();
-                    }
-                });
-
-            } catch (proxyError) {
-                console.error(`❌ Proxy error: ${proxyError.message}`);
-                return res.status(503).json({
-                    error: 'Chyba při proxy streamování',
-                    message: 'Zkuste později'
-                });
-            }
-        } else {
-            console.log('⚠️ Real-Debrid zpracování se nezdařilo');
-            return res.status(503).json({
-                error: 'Real-Debrid zpracování se nezdařilo',
-                message: 'Zkuste Direct Torrent stream'
-            });
+        // 1. Kontrola lokální cache
+        const cached = rdCache.get(infoHash);
+        if (cached && cached.expiresAt > now && cached.links) {
+            console.log(`🎯 Lokální cache HIT pro ${infoHash}`);
+            return res.redirect(302, cached.links[0].url);
         }
 
+        // 2. Kontrola aktivního zpracování
+        if (activeProcessing.has(infoHash)) {
+            console.log(`⏳ Čekám na aktivní zpracování pro ${infoHash}`);
+            try {
+                const result = await activeProcessing.get(infoHash);
+                if (result && result.length > 0) {
+                    console.log(`✅ Aktivní zpracování dokončeno pro ${infoHash}`);
+                    return res.redirect(302, result[0].url);
+                }
+            } catch (error) {
+                console.log(`❌ Aktivní zpracování selhalo: ${error.message}`);
+                activeProcessing.delete(infoHash);
+            }
+        }
+
+        // 3. Inteligentní zpracování s kontrolou existence v RD
+        const magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
+
+        const processingPromise = rdProcessor.addMagnetIfNotExists(magnetLink, infoHash, 2);
+        activeProcessing.set(infoHash, processingPromise);
+
+        try {
+            const rdLinks = await processingPromise;
+            activeProcessing.delete(infoHash);
+
+            if (rdLinks && rdLinks.length > 0) {
+                // Uložit do cache
+                rdCache.set(infoHash, {
+                    timestamp: now,
+                    links: rdLinks,
+                    expiresAt: now + CACHE_DURATION
+                });
+
+                console.log(`✅ RD zpracování úspěšné pro ${infoHash}`);
+                return res.redirect(302, rdLinks[0].url);
+            }
+        } catch (error) {
+            activeProcessing.delete(infoHash);
+            console.error(`❌ RD zpracování selhalo: ${error.message}`);
+        }
+
+        console.log(`⚠️ Real-Debrid zpracování se nezdařilo pro ${infoHash}`);
+        return res.status(503).json({
+            error: 'Real-Debrid zpracování se nezdařilo',
+            message: 'Zkuste Direct Torrent stream'
+        });
+
     } catch (error) {
-        console.error(`❌ Chyba Real-Debrid: ${error.message}`);
+        activeProcessing.delete(infoHash);
+        console.error(`❌ Chyba Real-Debrid zpracování: ${error.message}`);
         return res.status(503).json({
             error: 'Chyba Real-Debrid serveru',
             message: 'Zkuste Direct Torrent stream'
         });
     }
 });
+
+// Cleanup rutina pro čištění cache a aktivních zpracování
+setInterval(() => {
+    const now = Date.now();
+
+    // Vyčistit expirovanou cache
+    for (const [infoHash, cached] of rdCache.entries()) {
+        if (cached.expiresAt <= now) {
+            rdCache.delete(infoHash);
+            console.log(`🧹 Vyčištěn expirovaný cache pro ${infoHash}`);
+        }
+    }
+
+    // Vyčistit staré zpracování (starší než 5 minut)
+    const oldProcessingLimit = now - (5 * 60 * 1000);
+    for (const [infoHash] of activeProcessing.entries()) {
+        activeProcessing.delete(infoHash);
+        console.log(`🧹 Vyčištěno dlouho běžící zpracování pro ${infoHash}`);
+    }
+}, 60000); // Každou minutu
 
 // Převod addon na Express router
 const addonRouter = getRouter(builder.getInterface());
