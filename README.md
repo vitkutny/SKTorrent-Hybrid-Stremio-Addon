@@ -38,7 +38,7 @@ Tento addon je vyvíjen na bázi původního [Sktorrent-Stremio-addon](https://g
 
 ### 🔄 Proxy Streaming Mód
 
-**Nová funkcionalnost:** Addon nyní používá **proxy streaming** místo HTTP redirectů:
+**Nová funkce:** Addon nyní používá **proxy streaming** místo HTTP redirectů:
 
 * ✅ **Žádné přímé připojení** - Stremio se nikdy nepřipojuje přímo k Real-Debrid
 * ✅ **Serverová kontrola** - všechna video data prochází přes váš server
