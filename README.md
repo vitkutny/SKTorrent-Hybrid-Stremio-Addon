@@ -13,9 +13,11 @@ Tento addon je vyvíjen na bázi původního [Sktorrent-Stremio-addon](https://g
 * ⚡ **Real-Debrid integrace** s lazy loading processingem
 * 🎬 **Torrent streams** ze SKTorrent.eu
 * 🔐 **API klíč autentifikace** pro zabezpečení přístupu
-* 🎮 **Konfigurovatelné módy streamování** (RD\_ONLY, BOTH, TORRENT\_ONLY)
-* 🛡️ **IP bypass** - všechny requesty přes váš server
+* 🎮 **Konfigurovatelné módy streamování** (RD_ONLY, BOTH, TORRENT_ONLY)
+* 🔄 **Proxy streaming mód** - všechna video data přes server, žádné redirecty
+* 🛡️ **Maximální soukromí** - Stremio nevidí Real-Debrid URL
 * 📱 **Dockerizace** s jednoduchým nasazením
+
 
 ## 🚀 Hlavní funkce
 
@@ -23,7 +25,9 @@ Tento addon je vyvíjen na bázi původního [Sktorrent-Stremio-addon](https://g
 
 * ✅ **Cache kontrola** - okamžité přehrání dostupného obsahu
 * ✅ **Lazy processing** - RD zpracování až po výběru streamu
-* ✅ **IP protection** - všechny RD požadavky přes váš server
+* ✅ **Proxy streaming** - všechna video data streamují přes váš server
+* ✅ **IP protection** - Stremio nevidí Real-Debrid URL
+* ✅ **Range requests podpora** - plná kompatibilita pro video přehrávání
 
 ### Sktorrent.eu Features
 
@@ -31,6 +35,21 @@ Tento addon je vyvíjen na bázi původního [Sktorrent-Stremio-addon](https://g
 * ✅ **Multi-query systém** pro maximální pokrytí
 * ✅ **Jazykové vlajky** a metadata zobrazení
 * ✅ **Sezóny a epizody** s podporou různých formátů
+
+### 🔄 Proxy Streaming Mód
+
+**Nová funkcionalnost:** Addon nyní používá **proxy streaming** místo HTTP redirectů:
+
+* ✅ **Žádné přímé připojení** - Stremio se nikdy nepřipojuje přímo k Real-Debrid
+* ✅ **Serverová kontrola** - všechna video data prochází přes váš server
+* ✅ **Skryté URL** - Real-Debrid linky zůstávají skryté před klientem
+* ✅ **Range requests** - plná podpora pro video seeking a buffering
+* ⚡ **Performance** - vyšší zátěž serveru, ale maximální kontrola
+
+**Technické detaily:**
+- Nahrazuje `res.redirect(302, url)` za `streamResponse.data.pipe(res)`
+- Plná kompatibilita s video playery a seeking funkcionalitou
+- Automatické předávání HTTP headers pro optimální přehrávání
 
 ### Bezpečnost
 
@@ -272,6 +291,11 @@ docker-compose up --build -d
 ## 🔧 Řešení problémů
 
 ### Časté problémy
+
+**Pomalé načítání videí:**
+* Proxy streaming vyžaduje více bandwidth a CPU
+* Video data prochází přes váš server místo přímého připojení
+* Zvažte upgrade serveru při častém používání
 
 **Addon se nenačte:**
 
