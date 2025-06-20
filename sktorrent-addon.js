@@ -302,15 +302,21 @@ const app = express();
 app.set('trust proxy', true);
 const rdProcessor = new RealDebridAPI(process.env.REALDEBRID_API_KEY);
 
+// Middleware pro Range requests podporu (pro video streaming)
+app.use('/process/:infoHash', (req, res, next) => {
+    res.set({
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Range',
+        'Access-Control-Expose-Headers': 'Content-Range, Content-Length'
+    });
+    next();
+});
+
 // Middleware pro API klíč management
 app.use((req, res, next) => {
-    // ✅ OPRAVENO: Správné získání IP adresy přes proxy
     const clientIp = req.ip || req.headers['x-real-ip'] || req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'unknown';
-
-    // Pokud je X-Forwarded-For seznam IP adres, vzít první (původní klient)
     const realClientIp = clientIp.includes(',') ? clientIp.split(',')[0].trim() : clientIp;
 
-    // Aktualizace base URL
     if (req.get('host') && req.get('x-forwarded-proto')) {
         addonBaseUrl = `${req.get('x-forwarded-proto')}://${req.get('host')}`;
     } else if (req.get('host')) {
@@ -318,9 +324,8 @@ app.use((req, res, next) => {
     }
 
     console.log(`🔗 HTTP požadavek: ${req.method} ${req.url} - ${new Date().toISOString()}`);
-    console.log(`🌐 Návštěvník IP: ${realClientIp}`); // ✅ NOVÉ: Log skutečné IP
+    console.log(`🌐 Návštěvník IP: ${realClientIp}`);
 
-    // Pokud není nastaven API klíč, povolit vše (vývojový režim)
     if (!ADDON_API_KEY) {
         console.log('⚠️ API klíč není nastaven - povolen neomezený přístup (vývojový režim)');
         return next();
@@ -328,13 +333,11 @@ app.use((req, res, next) => {
 
     console.log('🔐 API klíč je vyžadován pro všechny požadavky');
 
-    // Povolit pouze úvodní stránku bez API klíče
     if (req.path === '/' && !req.query.api_key) {
         console.log('ℹ️ Povolen přístup na úvodní stránku bez API klíče');
         return next();
     }
 
-    // Získání API klíče z query nebo session (používat skutečnou IP)
     const apiKey = req.query.api_key || sessionKeys.get(realClientIp);
 
     if (!apiKey) {
@@ -343,7 +346,7 @@ app.use((req, res, next) => {
             error: 'Neautorizovaný přístup - API klíč je vyžadován',
             message: 'Přidejte ?api_key=VÁŠ_KLÍČ ke všem požadavkům',
             path: req.path,
-            clientIp: realClientIp // ✅ NOVÉ: Ukázat IP v odpovědi
+            clientIp: realClientIp
         });
     }
 
@@ -358,7 +361,6 @@ app.use((req, res, next) => {
 
     console.log(`✅ Autentizace API klíče úspěšná pro ${realClientIp} - ${req.path}`);
 
-    // Uložení API klíče do session (používat skutečnou IP)
     if (req.query.api_key) {
         sessionKeys.set(realClientIp, req.query.api_key);
         console.log(`🔑 API klíč uložen pro ${realClientIp}: ${req.query.api_key.substring(0, 8)}...`);
@@ -517,9 +519,10 @@ app.get('/', (req, res) => {
                 <p class="subtitle">Duální zobrazení streamů - Real-Debrid + Torrent současně</p>
 
                 <div class="feature-highlight">
-                    <h3>🎯 Nová funkcionalita: Duální streamy</h3>
+                    <h3>🎯 Nová funkcionalita: Duální streamy + Proxy mód</h3>
                     <p>✅ Zobrazuje Real-Debrid i Torrent streamy současně<br>
                     ✅ Žádné čekání na timeout - okamžitý výběr<br>
+                    ✅ Proxy streaming - všechny streamy jdou přes server<br>
                     ✅ Uživatel si vybere preferovanou metodu</p>
                 </div>
 
@@ -587,15 +590,15 @@ app.get('/', (req, res) => {
                     </div>
                     <div class="status-card status-active">
                         <div class="emoji">🎭</div>
-                        <h3>Duální zobrazení</h3>
-                        <p>Aktivní - RD + Torrent současně</p>
+                        <h3>Proxy Streaming</h3>
+                        <p>Aktivní - všechny streamy přes server</p>
                     </div>
                 </div>
 
                 <hr>
 
                 <div class="footer">
-                    <p><strong>Powered by:</strong> Duální stream zobrazení + Real-Debrid API + Zabezpečení</p>
+                    <p><strong>Powered by:</strong> Proxy streaming + Duální zobrazení + Real-Debrid API + Zabezpečení</p>
                 </div>
             </div>
         </body>
@@ -603,19 +606,65 @@ app.get('/', (req, res) => {
     `);
 });
 
-// Optimalizovaný endpoint pro Real-Debrid zpracování s cache a prevencí duplicit
+// PROXY ENDPOINT s kompletně přepracovaným streamováním místo redirectu
 app.get('/process/:infoHash', async (req, res) => {
     const { infoHash } = req.params;
     const now = Date.now();
 
     try {
-        console.log(`🚀 Real-Debrid požadavek pro: ${infoHash}`);
+        console.log(`🚀 Real-Debrid PROXY požadavek pro: ${infoHash}`);
 
-        // 1. Kontrola lokální cache
+        // 1. Kontrola lokální cache s PROXY streamováním
         const cached = rdCache.get(infoHash);
         if (cached && cached.expiresAt > now && cached.links) {
-            console.log(`🎯 Lokální cache HIT pro ${infoHash}`);
-            return res.redirect(302, cached.links[0].url);
+            console.log(`🎯 Lokální cache HIT pro ${infoHash} - PROXY streaming`);
+
+            try {
+                const streamResponse = await axios.get(cached.links[0].url, {
+                    responseType: 'stream',
+                    timeout: 30000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Range': req.headers.range || 'bytes=0-'
+                    }
+                });
+
+                // Nastavit headers pro proxy stream
+                res.set({
+                    'Content-Type': streamResponse.headers['content-type'] || 'video/mp4',
+                    'Content-Length': streamResponse.headers['content-length'],
+                    'Accept-Ranges': 'bytes',
+                    'Cache-Control': 'no-cache'
+                });
+
+                // Pokud je Range request, nastavit správný status a headers
+                if (req.headers.range && streamResponse.status === 206) {
+                    res.status(206);
+                    res.set('Content-Range', streamResponse.headers['content-range']);
+                }
+
+                console.log(`🔄 Cache PROXY streaming spuštěn pro ${infoHash}`);
+
+                // Proxy stream data přes server
+                streamResponse.data.pipe(res);
+
+                // Error handling pro stream
+                streamResponse.data.on('error', (error) => {
+                    console.error(`❌ Chyba cache proxy streamu: ${error.message}`);
+                    if (!res.headersSent) {
+                        res.status(500).json({ error: 'Chyba proxy streamu' });
+                    }
+                });
+
+                return;
+
+            } catch (proxyError) {
+                console.error(`❌ Cache proxy stream chyba: ${proxyError.message}`);
+                return res.status(503).json({
+                    error: 'Chyba proxy streamování z cache',
+                    message: 'Zkuste znovu nebo použijte Direct Torrent stream'
+                });
+            }
         }
 
         // 2. Kontrola aktivního zpracování
@@ -624,8 +673,40 @@ app.get('/process/:infoHash', async (req, res) => {
             try {
                 const result = await activeProcessing.get(infoHash);
                 if (result && result.length > 0) {
-                    console.log(`✅ Aktivní zpracování dokončeno pro ${infoHash}`);
-                    return res.redirect(302, result[0].url);
+                    console.log(`✅ Aktivní zpracování dokončeno pro ${infoHash} - PROXY streaming`);
+
+                    try {
+                        const streamResponse = await axios.get(result[0].url, {
+                            responseType: 'stream',
+                            timeout: 30000,
+                            headers: {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                                'Range': req.headers.range || 'bytes=0-'
+                            }
+                        });
+
+                        res.set({
+                            'Content-Type': streamResponse.headers['content-type'] || 'video/mp4',
+                            'Content-Length': streamResponse.headers['content-length'],
+                            'Accept-Ranges': 'bytes',
+                            'Cache-Control': 'no-cache'
+                        });
+
+                        if (req.headers.range && streamResponse.status === 206) {
+                            res.status(206);
+                            res.set('Content-Range', streamResponse.headers['content-range']);
+                        }
+
+                        console.log(`🔄 Aktivní PROXY streaming spuštěn pro ${infoHash}`);
+                        return streamResponse.data.pipe(res);
+
+                    } catch (proxyError) {
+                        console.error(`❌ Aktivní proxy stream chyba: ${proxyError.message}`);
+                        return res.status(503).json({
+                            error: 'Chyba proxy streamování z aktivního zpracování',
+                            message: 'Zkuste znovu nebo použijte Direct Torrent stream'
+                        });
+                    }
                 }
             } catch (error) {
                 console.log(`❌ Aktivní zpracování selhalo: ${error.message}`);
@@ -633,9 +714,8 @@ app.get('/process/:infoHash', async (req, res) => {
             }
         }
 
-        // 3. Inteligentní zpracování s kontrolou existence v RD
+        // 3. Nové zpracování s RD API
         const magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
-
         const processingPromise = rdProcessor.addMagnetIfNotExists(magnetLink, infoHash, 2);
         activeProcessing.set(infoHash, processingPromise);
 
@@ -651,8 +731,52 @@ app.get('/process/:infoHash', async (req, res) => {
                     expiresAt: now + CACHE_DURATION
                 });
 
-                console.log(`✅ RD zpracování úspěšné pro ${infoHash}`);
-                return res.redirect(302, rdLinks[0].url);
+                console.log(`✅ RD zpracování úspěšné pro ${infoHash} - PROXY streaming`);
+
+                try {
+                    const streamResponse = await axios.get(rdLinks[0].url, {
+                        responseType: 'stream',
+                        timeout: 30000,
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                            'Range': req.headers.range || 'bytes=0-'
+                        }
+                    });
+
+                    res.set({
+                        'Content-Type': streamResponse.headers['content-type'] || 'video/mp4',
+                        'Content-Length': streamResponse.headers['content-length'],
+                        'Accept-Ranges': 'bytes',
+                        'Cache-Control': 'no-cache'
+                    });
+
+                    if (req.headers.range && streamResponse.status === 206) {
+                        res.status(206);
+                        res.set('Content-Range', streamResponse.headers['content-range']);
+                    }
+
+                    console.log(`🔄 Nové PROXY streaming spuštěn pro ${infoHash}`);
+
+                    // Proxy stream data přes server
+                    streamResponse.data.pipe(res);
+
+                    // Error handling pro stream
+                    streamResponse.data.on('error', (error) => {
+                        console.error(`❌ Chyba nového proxy streamu: ${error.message}`);
+                        if (!res.headersSent) {
+                            res.status(500).json({ error: 'Chyba proxy streamu' });
+                        }
+                    });
+
+                    return;
+
+                } catch (proxyError) {
+                    console.error(`❌ Nový proxy stream chyba: ${proxyError.message}`);
+                    return res.status(503).json({
+                        error: 'Chyba proxy streamování z nového zpracování',
+                        message: 'Zkuste znovu nebo použijte Direct Torrent stream'
+                    });
+                }
             }
         } catch (error) {
             activeProcessing.delete(infoHash);
@@ -702,7 +826,7 @@ app.use('/', addonRouter);
 // Spuštění serveru
 app.listen(7000, () => {
     console.log('🚀 SKTorrent Hybrid doplněk běží na http://localhost:7000/manifest.json');
-    console.log('🔧 RD Processor endpoint: /process/{infoHash}');
+    console.log('🔧 RD PROXY Processor endpoint: /process/{infoHash}');
     console.log(`🔧 Režim: ${rd ? 'Dual (RD + Torrent)' : 'Pouze Torrent'}`);
     console.log(`🎮 Režim streamování: ${STREAM_MODE}`);
     console.log(`🔐 Zabezpečení: ${ADDON_API_KEY ? 'Chráněno API klíčem' : 'NEZABEZPEČENO - API klíč není nastaven'}`);
