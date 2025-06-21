@@ -212,11 +212,13 @@ app.use((req, res, next) => {
 
     console.log(`🔗 ${req.method} ${req.url} - ${uniqueClientId}`);
 
+    // Povolit veřejný přístup na hlavní stránku a favicon
+    if (req.path === '/' || req.path === '/favicon.ico') return next();
+
     if (!config.ADDON_API_KEY) {
         console.log('⚠️ Vývojový režim - bez API klíče');
         return next();
     }
-    if (req.path === '/' && !req.query.api_key) return next();
     if (req.path.startsWith('/debug/')) {
         const hash = req.path.split('/debug/')[1];
         if (Utils.validateInfoHash(hash)) {
