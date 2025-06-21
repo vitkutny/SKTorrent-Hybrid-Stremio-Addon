@@ -161,7 +161,7 @@ server {
     # deny all;
 
     location / {
-        proxy_pass http://127.0.0.1:7001;
+        proxy_pass http://127.0.0.1:7000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -182,8 +182,8 @@ server {
     SSLCertificateFile /cesta/k/ssl/cert.pem
     SSLCertificateKeyFile /cesta/k/ssl/key.pem
     ProxyPreserveHost On
-    ProxyPass / http://127.0.0.1:7001/
-    ProxyPassReverse / http://127.0.0.1:7001/
+    ProxyPass / http://127.0.0.1:7000/
+    ProxyPassReverse / http://127.0.0.1:7000/
     # IP omezení (volitelné)
     # <RequireAny>
     #   Require ip 85.160.123.456

@@ -16,7 +16,7 @@ RUN npm install --omit=dev && npm cache clean --force
 COPY *.js ./
 
 # Exponování portu
-EXPOSE 7001
+EXPOSE 7000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

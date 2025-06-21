@@ -535,8 +535,8 @@ setInterval(asyncCacheCleanup, 60 * 60 * 1000);
 const addonRouter = getRouter(builder.getInterface());
 app.use('/', addonRouter);
 
-app.listen(7001, '0.0.0.0', () => {
-    console.log('🚀 SKTorrent Hybrid Pro v1.0.0 Modular běží na http://0.0.0.0:7001');
+app.listen(7000, '0.0.0.0', () => {
+    console.log('🚀 SKTorrent Hybrid Pro v1.0.0 Modular běží na http://0.0.0.0:7000');
     console.log(`🔧 Režim: ${rd ? 'Dual (RD + Torrent)' : 'Pouze Torrent'} | Stream: ${config.STREAM_MODE}`);
     console.log(`🔐 Zabezpečení: ${config.ADDON_API_KEY ? 'API klíč aktivní' : 'VÝVOJOVÝ REŽIM'}`);
     console.log(`🛡️ Rate limit: ${authManager.RATE_LIMIT_MAX} req/hod`);
