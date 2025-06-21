@@ -1,7 +1,7 @@
 services:
-  sktorrent-hybrid-test:
+  sktorrent-hybrid:
     build: .
-    container_name: sktorrent-hybrid-test
+    container_name: sktorrent-hybrid
     restart: unless-stopped
     ports:
       - "127.0.0.1:7000:7000"
