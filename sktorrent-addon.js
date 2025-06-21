@@ -352,6 +352,34 @@ const getTorrentInfoCached = async (url) => {
     return info;
 };
 
+// Pomocná funkce pro sestavení magnet linku s parametry
+function buildMagnetLink(infoHash, name, size, trackers) {
+    let magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
+    const params = [];
+    if (name) {
+        const safeName = encodeURIComponent(name.replace(/[\r\n\0]/g, '').slice(0, 255));
+        params.push(`dn=${safeName}`);
+    }
+    if (size && !isNaN(Number(size))) {
+        params.push(`xl=${Number(size)}`);
+    }
+    if (Array.isArray(trackers)) {
+        trackers.forEach(tr => {
+            if (typeof tr === 'string' && tr.startsWith('http')) {
+                params.push(`tr=${encodeURIComponent(tr)}`);
+            }
+        });
+    } else {
+        // fallback tracker
+        const tracker = 'http://sktorrent.eu/torrent/announce.php';
+        params.push(`tr=${encodeURIComponent(tracker)}`);
+    }
+    if (params.length > 0) {
+        magnetLink += '&' + params.join('&');
+    }
+    return magnetLink;
+}
+
 // Handler pro streamy
 builder.defineStreamHandler(async ({ type, id }, req) => {
     console.log(`\n====== 🎮 STREAM pro ${type}:${id} ======`);
@@ -536,7 +564,7 @@ const addonRouter = getRouter(builder.getInterface());
 app.use('/', addonRouter);
 
 app.listen(7000, '0.0.0.0', () => {
-    console.log('🚀 SKTorrent Hybrid Pro v1.0.0 Modular běží na http://0.0.0.0:7000');
+    console.log('🚀 SKTorrent Hybrid v1.0.0 Modular běží na http://0.0.0.0:7000');
     console.log(`🔧 Režim: ${rd ? 'Dual (RD + Torrent)' : 'Pouze Torrent'} | Stream: ${config.STREAM_MODE}`);
     console.log(`🔐 Zabezpečení: ${config.ADDON_API_KEY ? 'API klíč aktivní' : 'VÝVOJOVÝ REŽIM'}`);
     console.log(`🛡️ Rate limit: ${authManager.RATE_LIMIT_MAX} req/hod`);
