@@ -6,17 +6,17 @@ RUN apk add --no-cache curl
 # Nastavení pracovního adresáře
 WORKDIR /usr/src/app
 
-# Kopírování package.json (bez package-lock.json)
+# Kopírování package.json
 COPY package.json ./
 
-# Instalace závislostí s npm install (vytvoří nový package-lock.json)
+# Instalace závislostí
 RUN npm install --omit=dev && npm cache clean --force
 
-# Kopírování zdrojových kódů
-COPY . .
+# Kopírování všech modulů a hlavního souboru
+COPY *.js ./
 
 # Exponování portu
-EXPOSE 7000
+EXPOSE 7001
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

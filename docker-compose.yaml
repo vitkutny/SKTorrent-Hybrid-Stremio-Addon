@@ -1,44 +1,17 @@
 services:
-  sktorrent-hybrid:
+  sktorrent-hybrid-test:
     build: .
-    container_name: sktorrent-hybrid
+    container_name: sktorrent-hybrid-test
     restart: unless-stopped
     ports:
-      - "127.0.0.1:7000:7000"
+      - "127.0.0.1:7001:7001"
     environment:
       - REALDEBRID_API_KEY=${REALDEBRID_API_KEY}
       - SKT_UID=${SKT_UID}
       - SKT_PASS=${SKT_PASS}
       - ADDON_API_KEY=${ADDON_API_KEY}
-      - STREAM_MODE=${STREAM_MODE:-RD_ONLY}
+      - STREAM_MODE=${STREAM_MODE}
       - NODE_ENV=production
+      - EXTERNAL_DOMAIN=${EXTERNAL_DOMAIN}
     env_file:
       - .env
-    networks:
-      - sktorrent-internal
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7000/manifest.json"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-  nginx:
-    image: nginx:alpine
-    container_name: nginx-proxy
-    restart: unless-stopped
-    ports:
-      - "443:443"
-      - "80:80"
-    volumes:
-      - ./nginx.conf:./conf/default.conf
-      - ./ssl/fullchain.cer:./ssl/certs/cert.pem:ro
-      - ./ssl/cert.key:./ssl/certs/key.pem:ro
-    depends_on:
-      - sktorrent-hybrid
-    networks:
-      - sktorrent-internal
-
-networks:
-  sktorrent-internal:
-    driver: bridge

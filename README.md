@@ -2,7 +2,7 @@
 
 ## 🙏 Poděkování
 
-Tento addon je vyvíjen na bázi původního [Sktorrent-Stremio-addon](https://github.com/original-author/Sktorrent-Stremio-addon) projektu. **Děkujeme původnímu autorovi** za vytvoření základní funkcionalit pro integraci SKTorrent.eu se Stremio platformou.
+Tento addon je vyvíjen na bázi původního [Sktorrent-Stremio-addon](https://github.com/JohnnyK007/Sktorrent-Stremio-addon) projektu. **Děkujeme původnímu autorovi** za vytvoření základní funkcionality pro integraci SKTorrent.eu se Stremio platformou.
 
 ---
 
@@ -13,11 +13,10 @@ Tento addon je vyvíjen na bázi původního [Sktorrent-Stremio-addon](https://g
 * ⚡ **Real-Debrid integrace** s lazy loading processingem
 * 🎬 **Torrent streams** ze SKTorrent.eu
 * 🔐 **API klíč autentifikace** pro zabezpečení přístupu
-* 🎮 **Konfigurovatelné módy streamování** (RD_ONLY, BOTH, TORRENT_ONLY)
+* 🎮 **Konfigurovatelné módy streamování** (`RD_ONLY`, `BOTH`, `TORRENT_ONLY`)
 * 🔄 **Proxy streaming mód** - všechna video data přes server, žádné redirecty
 * 🛡️ **Maximální soukromí** - Stremio nevidí Real-Debrid URL
 * 📱 **Dockerizace** s jednoduchým nasazením
-
 
 ## 🚀 Hlavní funkce
 
@@ -38,7 +37,7 @@ Tento addon je vyvíjen na bázi původního [Sktorrent-Stremio-addon](https://g
 
 ### 🔄 Proxy Streaming Mód
 
-**Nová funkce:** Addon nyní používá **proxy streaming** místo HTTP redirectů:
+Addon používá **proxy streaming** místo HTTP redirectů:
 
 * ✅ **Žádné přímé připojení** - Stremio se nikdy nepřipojuje přímo k Real-Debrid
 * ✅ **Serverová kontrola** - všechna video data prochází přes váš server
@@ -71,8 +70,8 @@ Tento addon je vyvíjen na bázi původního [Sktorrent-Stremio-addon](https://g
 Klonování repozitáře:
 
 ```bash
-git clone https://github.com/your-username/sktorrent-hybrid-addon.git
-cd sktorrent-hybrid-addon
+git clone https://github.com/Martin22/SKTorrent-Hybrid-Stremio-Addon.git
+cd SKTorrent-Hybrid-Stremio-Addon
 ```
 
 Vytvoření SSL složky (pokud používáte vlastní certifikáty):
@@ -101,6 +100,7 @@ STREAM_MODE=BOTH
 
 # Produkční nastavení
 NODE_ENV=production
+EXTERNAL_DOMAIN=your.domain.com
 ```
 
 ### Krok 3: Generování API klíče
@@ -123,42 +123,76 @@ echo "skt_$(date +%s)_$(openssl rand -hex 16)"
 2. **Otevřete Developer Tools** (F12) → Network tab
 3. **Načtěte libovolnou stránku** na sktorrent.eu
 4. **Najděte cookie hodnoty:**
-
    * `uid` - vaše uživatelské ID
    * `pass` - hash vašeho hesla
 5. **Zkopírujte hodnoty** do .env souboru
 
-### Krok 5: Konfigurace nginx
+### Krok 5: Reverzní proxy a SSL certifikát
 
-Aktualizujte `nginx.conf` se svou doménou a povolenými IP adresami:
+Pro bezpečný provoz je doporučeno provozovat addon za reverzní proxy s platným SSL certifikátem. Níže jsou ukázky konfigurace pro **nginx** i **Apache2**.
+
+#### Doporučený způsob získání SSL certifikátu (acme.sh)
+
+1. Instalace acme.sh:
+   ```bash
+   curl https://get.acme.sh | sh
+   ~/.acme.sh/acme.sh --upgrade --auto-upgrade
+   ```
+2. Vytvoření certifikátu pro vaši doménu (např. s DNS ověřením):
+   ```bash
+   ~/.acme.sh/acme.sh --issue --standalone -d your-domain.com
+   ~/.acme.sh/acme.sh --install-cert -d your-domain.com \
+     --key-file       /cesta/k/ssl/key.pem \
+     --fullchain-file /cesta/k/ssl/cert.pem
+   ```
+   Certifikáty pak použijte v konfiguraci proxy.
+
+#### Nginx (doporučeno)
 
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name your-domain.com; # ← UPRAVTE
+    server_name your-domain.com;
+    ssl_certificate /cesta/k/ssl/cert.pem;
+    ssl_certificate_key /cesta/k/ssl/key.pem;
 
-    ssl_certificate ssl/certs/cert.pem;
-    ssl_certificate_key ssl/certs/key.pem;
-
-    # IP omezení - UPRAVTE na vaše IP adresy
-    allow 85.160.123.456;     # Vaše domácí IP
-    allow 192.168.1.0/24;     # Lokální síť
-    allow 10.0.0.0/8;         # VPN rozsahy (volitelné)
-    deny all;
+    # IP omezení (volitelné)
+    # allow 85.160.123.456;
+    # deny all;
 
     location / {
-        proxy_pass http://sktorrent-hybrid:7000;
-        proxy_set_header Host $http_host;
+        proxy_pass http://127.0.0.1:7001;
+        proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
         proxy_connect_timeout 75s;
     }
 }
 ```
+
+#### Apache2 (alternativa)
+
+```apache
+<VirtualHost *:443>
+    ServerName your-domain.com
+    SSLEngine on
+    SSLCertificateFile /cesta/k/ssl/cert.pem
+    SSLCertificateKeyFile /cesta/k/ssl/key.pem
+    ProxyPreserveHost On
+    ProxyPass / http://127.0.0.1:7001/
+    ProxyPassReverse / http://127.0.0.1:7001/
+    # IP omezení (volitelné)
+    # <RequireAny>
+    #   Require ip 85.160.123.456
+    #   Require ip 192.168.1.0/24
+    # </RequireAny>
+</VirtualHost>
+```
+
+> **Poznámka:** Pokud změníte kód nebo závislosti, použijte `docker-compose up --build -d`.
 
 ### Krok 6: Spuštění služeb
 
@@ -192,7 +226,7 @@ https://your-domain.com/manifest.json?api_key=your_generated_api_key
 
 ## ⚙️ Konfigurace
 
-### Módy streamování (STREAM\_MODE)
+### Módy streamování (STREAM_MODE)
 
 #### `RD_ONLY` - Pouze Real-Debrid (Doporučeno)
 
@@ -314,7 +348,7 @@ docker-compose logs sktorrent-hybrid
 
 **Torrenty se nehledají:**
 
-* Zkontrolujte SKT\_UID a SKT\_PASS v .env
+* Zkontrolujte SKT_UID a SKT_PASS v .env
 * Ověřte připojení k sktorrent.eu
 
 ### Debug informace
@@ -340,16 +374,25 @@ docker-compose ps
 ## 📋 Struktura projektu
 
 ```
-sktorrent-hybrid-addon/
-├── sktorrent-addon.js          # Hlavní addon s Real-Debrid integrací
+sktorrent-hybrid-stremio-addon/
+├── sktorrent-addon.js          # Hlavní addon (vstupní bod)
+├── base-url-manager.js         # Správa veřejné domény
+├── config.js                   # Centrální konfigurace
+├── auth.js                     # Autentizace a session management
 ├── realdebrid.js               # Real-Debrid API helper
+├── streaming.js                # Správa streamování a proxy
+├── torrent-search.js           # Vyhledávání a zpracování torrentů
+├── templates.js                # Generování HTML šablon
+├── utils.js                    # Pomocné funkce
 ├── package.json                # NPM závislosti
 ├── Dockerfile                  # Docker image konfigurace
-├── docker-compose.yml          # Docker služby orchestrace
-├── nginx.conf                  # Nginx reverse proxy konfigurace
-├── .env                        # Environment proměnné (VYTVOŘTE)
-├── ssl/                        # SSL certifikáty (volitelné)
-└── README.md                   # Tento soubor
+├── docker-compose.yaml         # Docker Compose orchestrace
+├── LICENSE                     # Licence
+├── README.md                   # Tento soubor
+├── sample1.png                 # Ukázka použití (obrázek)
+├── sample2.png                 # Ukázka použití (obrázek)
+├── sktorrent-addon-logo.png    # Logo addonu
+└── vercel.json                 # (volitelné, pro nasazení na Vercel)
 ```
 
 ## 🤝 Přispívání
@@ -375,7 +418,7 @@ MIT License - volné použití bez záruky
 
 ## 👨‍💻 Autoři
 
-* **Původní autor:** [SKTorrent Stremio Addon](https://github.com/original-author/sktorrent-addon)
+* **Původní autor:** [SKTorrent Stremio Addon](https://github.com/JohnnyK007/Sktorrent-Stremio-addon)
 * **Hybrid verze:** Rozšíření o Real-Debrid funkcionalitu a pokročilé zabezpečení
 
 ---

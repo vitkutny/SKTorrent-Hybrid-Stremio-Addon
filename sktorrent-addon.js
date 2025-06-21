@@ -1,48 +1,59 @@
-// SKTorrent Stremio doplněk s duálním stream zobrazením (RD + Torrent)
+// SKTorrent-Hybrid - modularizovaná verze v1.0.0
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
-const { decode } = require("entities");
-const axios = require("axios");
-const cheerio = require("cheerio");
-const bencode = require("bncode");
-const crypto = require("crypto");
 const express = require("express");
+const asyncHandler = require("express-async-handler");
+const https = require("https");
+const http = require("http");
+const axios = require('axios');
+const config = require('./config');
+const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
+const { getBaseUrl } = require('./base-url-manager');
 
-// Real-Debrid API integrace
-const RealDebridAPI = require('./realdebrid');
+// Vždy používej baseUrl z EXTERNAL_DOMAIN
+const baseUrl = getBaseUrl();
 
-const SKT_UID = process.env.SKT_UID || "";
-const SKT_PASS = process.env.SKT_PASS || "";
-const ADDON_API_KEY = process.env.ADDON_API_KEY || "";
+const rdApiKey = process.env.REALDEBRID_API_KEY || null;
+const rd = rdApiKey ? require('./realdebrid') : null;
+const authManager = require('./auth')();
+const StreamingManager = require('./streaming');
+const torrentSearch = require('./torrent-search');
+const TemplateManager = require('./templates');
+const Utils = require('./utils');
 
-// Proměnná pro řízení zobrazování streamů
-const STREAM_MODE = process.env.STREAM_MODE || "BOTH"; // RD_ONLY, BOTH, TORRENT_ONLY
+// Klient pro HTTP požadavky s poolingem
+const apiClient = axios.create({
+    timeout: 15000,
+    httpsAgent: new https.Agent({ keepAlive: true, maxSockets: 10 }),
+    httpAgent: new http.Agent({ keepAlive: true, maxSockets: 10 }),
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+});
 
-// Inicializace Real-Debrid API
-const rd = process.env.REALDEBRID_API_KEY ?
-  new RealDebridAPI(process.env.REALDEBRID_API_KEY) : null;
+const streamingManager = new StreamingManager(apiClient);
+const { getRealDebridStreamUrl } = streamingManager;
 
-if (rd) {
-  console.log('🔧 Režim Real-Debrid hybrid aktivován');
-} else {
-  console.log('🔧 Režim pouze torrent (nastavte REALDEBRID_API_KEY pro hybrid)');
-}
+// Inicializace a výpis základních informací
+console.log(`🔧 Inicializace: RD=${!!rd}, Auth=${!!config.ADDON_API_KEY}, Mode=${config.STREAM_MODE}`);
 
-if (ADDON_API_KEY) {
-  console.log('🔐 Autentizace pomocí API klíče aktivována');
-} else {
-  console.log('⚠️ Varování: API klíč není nastaven - doplněk je přístupný všem');
-}
+// Mapování jazykových kódů na vlajky
+const langToFlag = {
+    CZ: "🇨🇿", SK: "🇸🇰", EN: "🇬🇧", US: "🇺🇸",
+    DE: "🇩🇪", FR: "🇫🇷", IT: "🇮🇹", ES: "🇪🇸",
+    RU: "🇷🇺", PL: "🇵🇱", HU: "🇭🇺", JP: "🇯🇵"
+};
 
-console.log(`🎮 Režim streamování: ${STREAM_MODE}`);
+// Pomocné funkce pro práci s torrent-search.js
+const searchTorrents = (query) => torrentSearch.searchTorrents(apiClient, config, query);
+const getTorrentInfo = (url) => torrentSearch.getTorrentInfo(apiClient, config, url);
+const getTitleFromIMDb = (imdbId) => torrentSearch.getTitleFromIMDb(apiClient, imdbId);
 
-const BASE_URL = "https://sktorrent.eu";
-const SEARCH_URL = `${BASE_URL}/torrent/torrents_v2.php`;
-
+// Definice addonu pro Stremio
 const builder = addonBuilder({
-    id: "org.stremio.sktorrent.hybrid.dual",
-    version: "2.0.0",
-    name: "SKTorrent Hybrid",
-    description: "Soukromý Real-Debrid + Torrent doplněk s ochranou API klíčem",
+    id: "org.stremio.sktorrent.hybrid.modular",
+    version: "1.0.0",
+    name: "SKTorrent-Hybrid",
+    description: "SKTorrent-Hybrid - Modularizovaný Real-Debrid + Torrent addon s pokročilou bezpečností",
     types: ["movie", "series"],
     catalogs: [
         { type: "movie", id: "sktorrent-movie", name: "SKTorrent Filmy" },
@@ -52,782 +63,482 @@ const builder = addonBuilder({
     idPrefixes: ["tt"]
 });
 
-const langToFlag = {
-    CZ: "🇨🇿", SK: "🇸🇰", EN: "🇬🇧", US: "🇺🇸",
-    DE: "🇩🇪", FR: "🇫🇷", IT: "🇮🇹", ES: "🇪🇸",
-    RU: "🇷🇺", PL: "🇵🇱", HU: "🇭🇺", JP: "🇯🇵",
-    KR: "🇰🇷", CN: "🇨🇳"
+const app = express();
+app.set('trust proxy', true);
+
+// Bezpečné nastavení CORS
+const allowedOrigins = process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : ['https://stremio.com'];
+app.use(cors({
+    origin: allowedOrigins,
+    credentials: true
+}));
+
+// Middleware pro základní hlavičky a rate limit
+app.use(asyncHandler(async (req, res, next) => {
+    res.set({
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Range, X-Session-ID',
+        'Access-Control-Expose-Headers': 'Content-Range, Content-Length'
+    });
+    const clientIp = req.ip || req.headers['x-real-ip'] || 'unknown';
+    if (!authManager.checkRateLimit(clientIp)) {
+        return res.status(429).json({ error: 'Rate limit exceeded' });
+    }
+    next();
+}));
+
+// Middleware pro validaci infoHash
+app.use('/process/:infoHash', (req, res, next) => {
+    if (!Utils.validateInfoHash(req.params.infoHash)) {
+        return res.status(400).json({ error: 'Neplatný infoHash formát' });
+    }
+    next();
+});
+
+// Debug endpoint pro analýzu torrentu
+app.get('/debug/:infoHash', async (req, res) => {
+    const { infoHash } = req.params;
+    try {
+        console.log(`🔍 Debug request pro hash: ${infoHash}`);
+        if (!Utils.validateInfoHash(infoHash)) {
+            return res.status(400).json({ error: 'Neplatný infoHash formát' });
+        }
+        // Předáváme i rdApiKey!
+        const debugResult = await streamingManager.debugTorrent(
+            infoHash,
+            { searchTorrents, getTorrentInfo, getTitleFromIMDb },
+            rd,
+            rdApiKey
+        );
+        // HTML odpověď s výsledky analýzy
+        const htmlResponse = `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>🔍 Debug Torrent: ${infoHash}</title>
+    <meta charset="utf-8">
+    <style>
+        body { font-family: monospace; max-width: 1200px; margin: 0 auto; padding: 20px; background: #1a1a1a; color: #00ff00; }
+        .step { margin: 5px 0; padding: 5px; background: #2a2a2a; border-left: 3px solid #00ff00; }
+        .error { border-left-color: #ff0000; color: #ff6666; }
+        .success { border-left-color: #00ff00; color: #66ff66; }
+        .info { border-left-color: #0066ff; color: #6666ff; }
+        .details { background: #333; padding: 15px; margin: 10px 0; border-radius: 5px; }
+        pre { overflow-x: auto; background: #444; padding: 10px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>🔍 DEBUG ANALÝZA TORRENTA</h1>
+    <div class="details">
+        <h2>📊 Základní info:</h2>
+        <p><strong>InfoHash:</strong> ${debugResult.infoHash}</p>
+        <p><strong>Čas analýzy:</strong> ${debugResult.timestamp}</p>
+        <p><strong>Úspěch:</strong> ${debugResult.success ? '✅ ANO' : '❌ NE'}</p>
+        ${debugResult.error ? `<p><strong>Chyba:</strong> <span style="color: #ff6666">${debugResult.error}</span></p>` : ''}
+    </div>
+    ${debugResult.torrentDetails ? `
+    <div class="details">
+        <h2>📦 Detaily torrenta:</h2>
+        <pre>${JSON.stringify(debugResult.torrentDetails, null, 2)}</pre>
+    </div>
+    ` : ''}
+    ${debugResult.magnetLink ? `
+    <div class="details">
+        <h2>🧲 Magnet Link:</h2>
+        <p style="word-break: break-all; background: #444; padding: 10px;">${debugResult.magnetLink}</p>
+    </div>
+    ` : ''}
+    ${debugResult.rdStatus ? `
+    <div class="details">
+        <h2>🔄 Real-Debrid Status:</h2>
+        <pre>${JSON.stringify(debugResult.rdStatus, null, 2)}</pre>
+    </div>
+    ` : ''}
+    ${debugResult.rdLinks ? `
+    <div class="details">
+        <h2>🔗 RD Links (prvních 3):</h2>
+        <pre>${JSON.stringify(debugResult.rdLinks, null, 2)}</pre>
+    </div>
+    ` : ''}
+    ${debugResult.cacheData ? `
+    <div class="details">
+        <h2>📋 Cache Data:</h2>
+        <pre>${JSON.stringify(debugResult.cacheData, null, 2)}</pre>
+    </div>
+    ` : ''}
+    <div class="details">
+        <h2>📝 Kroky analýzy:</h2>
+        ${debugResult.steps.map(step => {
+            let className = 'step';
+            if (step.includes('❌')) className += ' error';
+            else if (step.includes('✅')) className += ' success';
+            else if (step.includes('🔍') || step.includes('📊')) className += ' info';
+            return `<div class="${className}">${step}</div>`;
+        }).join('')}
+    </div>
+    <div class="details">
+        <h2>🔧 Kompletní debug data:</h2>
+        <pre>${JSON.stringify(debugResult, null, 2)}</pre>
+    </div>
+</body>
+</html>`;
+        res.send(htmlResponse);
+    } catch (error) {
+        console.error(`❌ Debug endpoint chyba: ${error.message}`);
+        res.status(500).json({ error: 'Debug chyba', message: error.message });
+    }
+});
+
+// Middleware pro timeout na /process/:infoHash
+app.use('/process/:infoHash', (req, res, next) => {
+    req.timeout = 30000;
+    const timeoutHandler = setTimeout(() => {
+        if (!res.headersSent) {
+            console.log(`⏰ Timeout pro ${req.params.infoHash} - ukončuji požadavek`);
+            res.status(408).send('Request Timeout');
+            res.end();
+        }
+    }, req.timeout);
+    res.on('finish', () => clearTimeout(timeoutHandler));
+    res.on('close', () => clearTimeout(timeoutHandler));
+    next();
+});
+
+// Middleware pro logování a autorizaci
+app.use((req, res, next) => {
+    const clientIp = req.ip || 'unknown';
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    const uniqueClientId = authManager.createUniqueClientId(clientIp, userAgent);
+
+    console.log(`🔗 ${req.method} ${req.url} - ${uniqueClientId}`);
+
+    if (!config.ADDON_API_KEY) {
+        console.log('⚠️ Vývojový režim - bez API klíče');
+        return next();
+    }
+    if (req.path === '/' && !req.query.api_key) return next();
+    if (req.path.startsWith('/debug/')) {
+        const hash = req.path.split('/debug/')[1];
+        if (Utils.validateInfoHash(hash)) {
+            console.log('🔍 Debug endpoint - přeskakuji auth');
+            return next();
+        }
+    }
+    const session = authManager.getSessionFromRequest(req);
+    if (!session || session.apiKey !== config.ADDON_API_KEY) {
+        console.log(`🚫 Neautorizovaný přístup od ${uniqueClientId}`);
+        return res.status(401).json({
+            error: 'Neautorizovaný přístup',
+            message: 'API klíč je vyžadován'
+        });
+    }
+    console.log(`✅ Autorizace úspěšná pro ${uniqueClientId}`);
+    if (req.query.api_key) {
+        if (authManager.setSessionKey) {
+            authManager.setSessionKey(clientIp, req.query.api_key);
+            authManager.setSessionKey(uniqueClientId, req.query.api_key);
+        }
+        const sessionId = authManager.createSession(req.query.api_key, clientIp, userAgent);
+        res.cookie('sessionId', sessionId, {
+            httpOnly: true,
+            secure: req.secure,
+            sameSite: 'lax',
+            maxAge: authManager.SESSION_TTL
+        });
+    }
+    next();
+});
+
+// Implementace LRU cache pro vyhledávání a info
+class LRUCache {
+    constructor(maxSize = 500) {
+        this.maxSize = maxSize;
+        this.cache = new Map();
+    }
+    get(key) {
+        if (!this.cache.has(key)) return null;
+        const value = this.cache.get(key);
+        // Přesun na konec (nejpoužívanější)
+        this.cache.delete(key);
+        this.cache.set(key, value);
+        return value;
+    }
+    set(key, value) {
+        if (this.cache.has(key)) this.cache.delete(key);
+        this.cache.set(key, value);
+        if (this.cache.size > this.maxSize) {
+            // Odstranění nejméně používaného (první)
+            const firstKey = this.cache.keys().next().value;
+            this.cache.delete(firstKey);
+        }
+    }
+    delete(key) {
+        this.cache.delete(key);
+    }
+    clear() {
+        this.cache.clear();
+    }
+}
+
+// Debounce map pro dotazy (sloučení stejných dotazů v krátkém čase)
+const debounceMap = new Map();
+const DEBOUNCE_TTL = 2000; // 2 sekundy
+
+// LRU cache pro vyhledávání a info
+const SEARCH_CACHE_TTL = 10 * 60 * 1000; // 10 minut
+const INFO_CACHE_TTL = 30 * 60 * 1000;   // 30 minut
+
+const searchCache = new LRUCache(500);
+const infoCache = new LRUCache(1000);
+
+// Funkce pro získání hodnoty z cache
+function getCache(cache, key) {
+    const entry = cache.get(key);
+    if (entry && entry.expires > Date.now()) return entry.value;
+    if (entry) cache.delete(key);
+    return null;
+}
+// Funkce pro nastavení hodnoty do cache
+function setCache(cache, key, value, ttl) {
+    cache.set(key, { value, expires: Date.now() + ttl });
+}
+
+// Debounced vyhledávání torrentů
+const debouncedSearchTorrents = async (query) => {
+    if (debounceMap.has(query)) return debounceMap.get(query);
+    const promise = searchTorrents(query)
+        .finally(() => {
+            setTimeout(() => debounceMap.delete(query), DEBOUNCE_TTL);
+        });
+    debounceMap.set(query, promise);
+    return promise;
 };
 
-// Funkce pro odstranění diakritiky z textu
-function removeDiacritics(str) {
-    return str.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-}
-
-// Funkce pro zkrácení názvu na určitý počet slov
-function shortenTitle(title, wordCount = 3) {
-    return title.split(/\s+/).slice(0, wordCount).join(" ");
-}
-
-// Funkce pro detekci multi-season balíku
-function isMultiSeason(title) {
-    return /(S\d{2}E\d{2}-\d{2}|Complete|All Episodes|Season \d+(-\d+)?)/i.test(title);
-}
-
-// Funkce pro extrakci kvality z názvu
-function extractQuality(title) {
-    const titleLower = title.toLowerCase();
-    if (titleLower.includes('2160p') || titleLower.includes('4k')) return '4K';
-    if (titleLower.includes('1080p')) return '1080p';
-    if (titleLower.includes('720p')) return '720p';
-    if (titleLower.includes('480p')) return '480p';
-    return 'SD';
-}
-
-// Funkce pro získání názvu z IMDb
-async function getTitleFromIMDb(imdbId) {
-    try {
-        const res = await axios.get(`https://www.imdb.com/title/${imdbId}/`, {
-            headers: { "User-Agent": "Mozilla/5.0" },
-            timeout: 5000
-        });
-        const $ = cheerio.load(res.data);
-        const titleRaw = $('title').text().split(' - ')[0].trim();
-        const title = decode(titleRaw);
-        const ldJson = $('script[type="application/ld+json"]').html();
-        let originalTitle = title;
-        if (ldJson) {
-            try {
-                const json = JSON.parse(ldJson);
-                if (json && json.name) originalTitle = decode(json.name.trim());
-            } catch (e) {}
+// Paralelní vyhledávání s LRU cache a debouncingem
+const parallelSearchTorrents = async (queries) => {
+    const cachedResults = [];
+    const uncachedQueries = [];
+    for (const query of queries) {
+        const cached = getCache(searchCache, query);
+        if (cached) {
+            cachedResults.push({ query, results: cached });
+        } else {
+            uncachedQueries.push(query);
         }
-        console.log(`[DEBUG] 🌝 Lokalizovaný název: ${title}`);
-        console.log(`[DEBUG] 🇳️ Originální název: ${originalTitle}`);
-        return { title, originalTitle };
-    } catch (err) {
-        console.error("[ERROR] Chyba při získávání z IMDb:", err.message);
-        return null;
     }
-}
-
-// Funkce pro vyhledávání torrentů na SKTorrent
-async function searchTorrents(query) {
-    console.log(`[INFO] 🔎 Hledám '${query}' na SKTorrent...`);
-    try {
-        const session = axios.create({
-            headers: { Cookie: `uid=${SKT_UID}; pass=${SKT_PASS}` },
-            timeout: 10000
-        });
-        const res = await session.get(SEARCH_URL, { params: { search: query, category: 0 } });
-        const $ = cheerio.load(res.data);
-        const posters = $('a[href^="details.php"] img');
-        const results = [];
-
-        posters.each((i, img) => {
-            const parent = $(img).closest("a");
-            const outerTd = parent.closest("td");
-            const fullBlock = outerTd.text().replace(/\s+/g, ' ').trim();
-            const href = parent.attr("href") || "";
-            const tooltip = parent.attr("title") || "";
-            const torrentId = href.split("id=").pop();
-            const category = outerTd.find("b").first().text().trim();
-            const sizeMatch = fullBlock.match(/Velkost\s([^|]+)/i);
-            const seedMatch = fullBlock.match(/Odosielaju\s*:\s*(\d+)/i);
-            const size = sizeMatch ? sizeMatch[1].trim() : "?";
-            const seeds = seedMatch ? seedMatch[1] : "0";
-            if (!category.toLowerCase().includes("film") && !category.toLowerCase().includes("seri")) return;
-            results.push({
-                name: tooltip,
-                id: torrentId,
-                size,
-                seeds,
-                category,
-                downloadUrl: `${BASE_URL}/torrent/download.php?id=${torrentId}`
-            });
-        });
-        console.log(`[INFO] 📦 Nalezeno torrentů: ${results.length}`);
-        return results;
-    } catch (err) {
-        console.error("[ERROR] Vyhledávání selhalo:", err.message);
-        return [];
+    const searchPromises = uncachedQueries.map(query =>
+        debouncedSearchTorrents(query).then(results => ({ query, results })).catch(() => ({ query, results: [] }))
+    );
+    const results = await Promise.all(searchPromises);
+    for (const { query, results: res } of results) {
+        setCache(searchCache, query, res, SEARCH_CACHE_TTL);
     }
-}
-
-// Funkce pro získání kompletních informací z torrent souboru
-async function getTorrentInfo(url) {
-    try {
-        const res = await axios.get(url, {
-            responseType: "arraybuffer",
-            headers: {
-                Cookie: `uid=${SKT_UID}; pass=${SKT_PASS}`,
-                Referer: BASE_URL
-            },
-            timeout: 15000
-        });
-        const torrent = bencode.decode(res.data);
-        const info = bencode.encode(torrent.info);
-        const infoHash = crypto.createHash("sha1").update(info).digest("hex");
-
-        return {
-            infoHash,
-            name: torrent.info.name ? torrent.info.name.toString() : ''
-        };
-    } catch (err) {
-        console.error("[ERROR] Chyba při zpracování .torrent:", err.message);
-        return null;
+    const allResults = [...cachedResults, ...results];
+    for (const q of queries) {
+        const found = allResults.find(r => r.query === q && r.results && r.results.length > 0);
+        if (found) return found.results;
     }
-}
+    return [];
+};
 
-// Globální proměnné
-let addonBaseUrl = 'http://localhost:7000';
-const sessionKeys = new Map();
+// Získání info o torrentu s LRU cache
+const getTorrentInfoCached = async (url) => {
+    const cached = getCache(infoCache, url);
+    if (cached) return cached;
+    const info = await getTorrentInfo(url);
+    if (info) setCache(infoCache, url, info, INFO_CACHE_TTL);
+    return info;
+};
 
-// Cache a tracking pro RD optimalizaci
-const activeProcessing = new Map(); // infoHash -> Promise
-const rdCache = new Map(); // infoHash -> {timestamp, links, expiresAt}
-const CACHE_DURATION = 10 * 60 * 1000; // 10 minut cache
-
-// Definice stream handleru s duálním zobrazením
-builder.defineStreamHandler(async (args) => {
-    const { type, id } = args;
-    console.log(`\n====== 🎮 RAW Požadavek: type='${type}', id='${id}' ======`);
-
+// Handler pro streamy
+builder.defineStreamHandler(async ({ type, id }, req) => {
+    console.log(`\n====== 🎮 STREAM pro ${type}:${id} ======`);
     const [imdbId, sRaw, eRaw] = id.split(":");
     const season = sRaw ? parseInt(sRaw) : undefined;
     const episode = eRaw ? parseInt(eRaw) : undefined;
-
-    console.log(`====== 🎮 STREAM Požadavek pro typ='${type}' imdbId='${imdbId}' season='${season}' episode='${episode}' ======`);
-
     const titles = await getTitleFromIMDb(imdbId);
     if (!titles) return { streams: [] };
-
     const { title, originalTitle } = titles;
-    const queries = new Set();
-    const baseTitles = [title, originalTitle].map(t => t.replace(/\(.*?\)/g, '').replace(/TV (Mini )?Series/gi, '').trim());
+    const queries = Utils.generateSearchQueries(title, originalTitle, type, season, episode);
 
-    baseTitles.forEach(base => {
-        const noDia = removeDiacritics(base);
-        const short = shortenTitle(noDia);
-
-        if (type === 'series' && season && episode) {
-            const epTag = ` S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
-            [base, noDia, short].forEach(b => {
-                queries.add(b + epTag);
-                queries.add((b + epTag).replace(/[\':]/g, ''));
-                queries.add((b + epTag).replace(/[\':]/g, '').replace(/\s+/g, '.'));
-            });
-        } else {
-            [base, noDia, short].forEach(b => {
-                queries.add(b);
-                queries.add(b.replace(/[\':]/g, ''));
-                queries.add(b.replace(/[\':]/g, '').replace(/\s+/g, '.'));
-            });
-        }
-    });
-
-    let torrents = [];
-    let attempt = 1;
-    for (const q of queries) {
-        console.log(`[DEBUG] 🔍 Pokus ${attempt++}: Hledám '${q}'`);
-        torrents = await searchTorrents(q);
-        if (torrents.length > 0) break;
-    }
-
+    // Paralelní vyhledávání s cache
+    const torrents = await parallelSearchTorrents(queries);
     if (torrents.length === 0) {
-        console.log(`[INFO] ❌ Žádné torrenty nenalezeny`);
+        console.log(`❌ Žádné torrenty nenalezeny`);
         return { streams: [] };
     }
 
     const streams = [];
-    console.log(`🎮 Režim streamování: ${STREAM_MODE} - generuji duální streamy...`);
+    
+    // Správná baseUrl pro streamy
+    const currentBaseUrl = baseUrl;
+    if (!currentBaseUrl) {
+        console.error('❌ Nelze určit BaseUrl pro streamy.');
+        return { streams: [] };
+    }
+    const allStoredKeys = authManager.getAllSessionKeys ? authManager.getAllSessionKeys() : [];
+    const availableApiKey = allStoredKeys.length > 0 ? allStoredKeys[0] : null;
 
-    // Zpracování torrentů pro duální zobrazení
-    const apiKeyFromArgs = args.extra && args.extra.api_key ? args.extra.api_key : null;
-    const allStoredKeys = Array.from(sessionKeys.values());
-    const fallbackApiKey = allStoredKeys.length > 0 ? allStoredKeys[0] : null;
-    const availableApiKey = apiKeyFromArgs || fallbackApiKey;
+    // Paralelní získání info o torrentech s cache a timeoutem
+    let torrentInfos;
+    try {
+        torrentInfos = await Promise.race([
+            Promise.all(
+                torrents.slice(0, 5).map(t => {
+                    console.log(`🧩 SKTorrent downloadUrl: ${t.downloadUrl}`);
+                    return getTorrentInfoCached(t.downloadUrl);
+                })
+            ),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout při získávání torrent info (2 minuty)')), 2 * 60 * 1000))
+        ]);
+    } catch (e) {
+        return { streams: [] };
+    }
 
-    for (const torrent of torrents.slice(0, 5)) {
-        const torrentInfo = await getTorrentInfo(torrent.downloadUrl);
+    // Pro debug: vypiš všechny SKTorrent downloadUrl
+    if (req && typeof req.debug === 'object') {
+        req.debug.sktorrentDownloadUrls = torrents.slice(0, 5).map(t => t.downloadUrl);
+    }
+
+    for (let i = 0; i < torrents.slice(0, 5).length; i++) {
+        const torrent = torrents[i];
+        const torrentInfo = torrentInfos[i];
         if (!torrentInfo) continue;
-
-        // Společný parser pro názvy
         let cleanedTitle = torrent.name.replace(/^Stiahni si\s*/i, "").trim();
         const categoryPrefix = torrent.category.trim().toLowerCase();
         if (cleanedTitle.toLowerCase().startsWith(categoryPrefix)) {
             cleanedTitle = cleanedTitle.slice(torrent.category.length).trim();
         }
-
         const langMatches = torrent.name.match(/\b([A-Z]{2})\b/g) || [];
         const flags = langMatches.map(code => langToFlag[code.toUpperCase()]).filter(Boolean);
         const flagsText = flags.length ? `\n${flags.join(" / ")}` : "";
 
-        // 1. Real-Debrid stream (pokud je povolený)
-        if (rd && (STREAM_MODE === "RD_ONLY" || STREAM_MODE === "BOTH")) {
+        if (rd && (config.STREAM_MODE === "RD_ONLY" || config.STREAM_MODE === "BOTH")) {
             const processUrl = availableApiKey
-                ? `${addonBaseUrl}/process/${torrentInfo.infoHash}?api_key=${availableApiKey}`
-                : `${addonBaseUrl}/process/${torrentInfo.infoHash}`;
-
+                ? `${currentBaseUrl}/process/${torrentInfo.infoHash}?api_key=${availableApiKey}`
+                : `${currentBaseUrl}/process/${torrentInfo.infoHash}`;
             streams.push({
                 name: `⚡ Real-Debrid\n${torrent.category}`,
-                title: `${cleanedTitle}\n👤 ${torrent.seeds}  📀 ${torrent.size}  🚀 Rychlé přehrání${flagsText}`,
+                title: `${cleanedTitle}\n👤 ${torrent.seeds}  📀 ${torrent.size}  🚀 Rychlé${flagsText}`,
                 url: processUrl,
                 behaviorHints: { bingeGroup: `rd-${cleanedTitle}` }
             });
         }
-
-        // 2. Direct Torrent stream (pokud je povolený)
-        if (STREAM_MODE === "TORRENT_ONLY" || STREAM_MODE === "BOTH") {
+        if (config.STREAM_MODE === "TORRENT_ONLY" || config.STREAM_MODE === "BOTH") {
             streams.push({
                 name: `🎬 Direct Torrent\n${torrent.category}`,
-                title: `${cleanedTitle}\n👤 ${torrent.seeds}  📀 ${torrent.size}  💾 Přímé stahování${flagsText}`,
+                title: `${cleanedTitle}\n👤 ${torrent.seeds}  📀 ${torrent.size}  💾 Přímé${flagsText}`,
                 infoHash: torrentInfo.infoHash,
                 behaviorHints: { bingeGroup: `torrent-${cleanedTitle}` }
             });
         }
     }
-
-    console.log(`[INFO] ✅ Odesílám ${streams.length} streamů do Stremio (Režim: ${STREAM_MODE})`);
+    console.log(`✅ Odesílám ${streams.length} streamů (${config.STREAM_MODE})`);
     return { streams };
 });
 
+// Handler pro katalogy
 builder.defineCatalogHandler(({ type, id }) => {
-    console.log(`[DEBUG] 📚 Požadavek na katalog pro typ='${type}' id='${id}'`);
+    console.log(`📚 Katalog ${type}:${id}`);
     return { metas: [] };
 });
 
-// Express server s API klíč autentifikací
-const app = express();
-app.set('trust proxy', true);
-const rdProcessor = new RealDebridAPI(process.env.REALDEBRID_API_KEY);
-
-// Middleware pro Range requests podporu (pro video streaming)
-app.use('/process/:infoHash', (req, res, next) => {
-    res.set({
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Range',
-        'Access-Control-Expose-Headers': 'Content-Range, Content-Length'
-    });
-    next();
-});
-
-// Middleware pro API klíč management
-app.use((req, res, next) => {
-    const clientIp = req.ip || req.headers['x-real-ip'] || req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'unknown';
-    const realClientIp = clientIp.includes(',') ? clientIp.split(',')[0].trim() : clientIp;
-
-    if (req.get('host') && req.get('x-forwarded-proto')) {
-        addonBaseUrl = `${req.get('x-forwarded-proto')}://${req.get('host')}`;
-    } else if (req.get('host')) {
-        addonBaseUrl = `${req.protocol}://${req.get('host')}`;
-    }
-
-    console.log(`🔗 HTTP požadavek: ${req.method} ${req.url} - ${new Date().toISOString()}`);
-    console.log(`🌐 Návštěvník IP: ${realClientIp}`);
-
-    if (!ADDON_API_KEY) {
-        console.log('⚠️ API klíč není nastaven - povolen neomezený přístup (vývojový režim)');
-        return next();
-    }
-
-    console.log('🔐 API klíč je vyžadován pro všechny požadavky');
-
-    if (req.path === '/' && !req.query.api_key) {
-        console.log('ℹ️ Povolen přístup na úvodní stránku bez API klíče');
-        return next();
-    }
-
-    const apiKey = req.query.api_key || sessionKeys.get(realClientIp);
-
-    if (!apiKey) {
-        console.log(`🚫 Žádný API klíč od ${realClientIp} pro ${req.path}`);
-        return res.status(401).json({
-            error: 'Neautorizovaný přístup - API klíč je vyžadován',
-            message: 'Přidejte ?api_key=VÁŠ_KLÍČ ke všem požadavkům',
-            path: req.path,
-            clientIp: realClientIp
-        });
-    }
-
-    if (apiKey !== ADDON_API_KEY) {
-        console.log(`🚫 Neplatný API klíč od ${realClientIp}: ${apiKey.substring(0, 8)}... pro ${req.path}`);
-        return res.status(401).json({
-            error: 'Neautorizovaný přístup - neplatný API klíč',
-            message: 'Poskytnutý API klíč není platný',
-            clientIp: realClientIp
-        });
-    }
-
-    console.log(`✅ Autentizace API klíče úspěšná pro ${realClientIp} - ${req.path}`);
-
-    if (req.query.api_key) {
-        sessionKeys.set(realClientIp, req.query.api_key);
-        console.log(`🔑 API klíč uložen pro ${realClientIp}: ${req.query.api_key.substring(0, 8)}...`);
-    }
-
-    next();
-});
-
-// Úvodní stránka
+// Hlavní stránka addonu
 app.get('/', (req, res) => {
-    const hasApiKey = req.query.api_key === ADDON_API_KEY;
-
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>SKTorrent Hybrid Addon (Soukromý)</title>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                body {
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-                    max-width: 900px;
-                    margin: 0 auto;
-                    padding: 20px;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: #333;
-                    min-height: 100vh;
-                }
-                .container {
-                    background: white;
-                    border-radius: 15px;
-                    padding: 40px;
-                    box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-                }
-                h1 {
-                    color: #4a5568;
-                    text-align: center;
-                    margin-bottom: 10px;
-                    font-size: 2.5em;
-                }
-                .subtitle {
-                    text-align: center;
-                    color: #718096;
-                    font-size: 1.2em;
-                    margin-bottom: 40px;
-                }
-                .feature-highlight {
-                    background: #e6fffa;
-                    border: 2px solid #38b2ac;
-                    border-radius: 10px;
-                    padding: 20px;
-                    margin: 20px 0;
-                    text-align: center;
-                }
-                .auth-section {
-                    background: ${hasApiKey ? '#f0fff4' : '#fffaf0'};
-                    border: 2px solid ${hasApiKey ? '#48bb78' : '#f56565'};
-                    border-radius: 10px;
-                    padding: 30px;
-                    margin: 30px 0;
-                    text-align: center;
-                }
-                .install-section {
-                    background: #f7fafc;
-                    border: 2px solid #e2e8f0;
-                    border-radius: 10px;
-                    padding: 30px;
-                    margin: 30px 0;
-                    text-align: center;
-                }
-                .install-button {
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                    padding: 15px 30px;
-                    text-decoration: none;
-                    border-radius: 25px;
-                    display: inline-block;
-                    margin: 15px 10px;
-                    font-weight: bold;
-                    font-size: 1.1em;
-                    transition: transform 0.2s;
-                }
-                .install-button:hover {
-                    transform: translateY(-2px);
-                }
-                .install-button:disabled {
-                    background: #ccc;
-                    cursor: not-allowed;
-                }
-                code {
-                    background: #2d3748;
-                    color: #68d391;
-                    padding: 8px 12px;
-                    border-radius: 5px;
-                    font-family: 'Monaco', 'Consolas', monospace;
-                    word-break: break-all;
-                    display: inline-block;
-                    margin: 10px 0;
-                }
-                .warning {
-                    background: #fed7d7;
-                    border: 1px solid #fc8181;
-                    border-radius: 5px;
-                    padding: 15px;
-                    margin: 20px 0;
-                    color: #9b2c2c;
-                }
-                .error {
-                    background: #fed7d7;
-                    border: 2px solid #fc8181;
-                    border-radius: 5px;
-                    padding: 20px;
-                    margin: 20px 0;
-                    color: #9b2c2c;
-                    font-weight: bold;
-                }
-                .success {
-                    background: #c6f6d5;
-                    border: 1px solid #68d391;
-                    border-radius: 5px;
-                    padding: 15px;
-                    margin: 20px 0;
-                    color: #276749;
-                }
-                .status-grid {
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                    gap: 20px;
-                    margin: 30px 0;
-                }
-                .status-card {
-                    background: #f7fafc;
-                    border-radius: 10px;
-                    padding: 20px;
-                    text-align: center;
-                    border: 2px solid #e2e8f0;
-                }
-                .status-active { border-color: #48bb78; background: #f0fff4; }
-                .status-inactive { border-color: #f56565; background: #fffaf0; }
-                .status-warning { border-color: #ed8936; background: #fffbeb; }
-                .emoji { font-size: 1.5em; margin-right: 10px; }
-                hr { border: none; height: 2px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); margin: 40px 0; }
-                .footer {
-                    text-align: center;
-                    color: #718096;
-                    margin-top: 40px;
-                    padding-top: 20px;
-                    border-top: 1px solid #e2e8f0;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🔐 SKTorrent Hybrid Addon</h1>
-                <p class="subtitle">Duální zobrazení streamů - Real-Debrid + Torrent současně</p>
-
-                <div class="feature-highlight">
-                    <h3>🎯 Nová funkcionalita: Duální streamy + Proxy mód</h3>
-                    <p>✅ Zobrazuje Real-Debrid i Torrent streamy současně<br>
-                    ✅ Žádné čekání na timeout - okamžitý výběr<br>
-                    ✅ Proxy streaming - všechny streamy jdou přes server<br>
-                    ✅ Uživatel si vybere preferovanou metodu</p>
-                </div>
-
-                <div class="auth-section">
-                    <h2>${hasApiKey ? '✅ Autentizovaný přístup' : '🔒 Vyžadována autentizace'}</h2>
-                    ${hasApiKey ?
-                        '<div class="success">✅ API klíč je platný - máte přístup</div>' :
-                        ADDON_API_KEY ?
-                        '<div class="error">🚫 API klíč je vyžadován pro všechny funkce. Bez platného klíče není přístup.</div>' :
-                        '<div class="warning">⚠️ Doplněk běží v režimu vývoje - bez zabezpečení</div>'
-                    }
-                </div>
-
-                <div class="install-section">
-                    <h2>📥 Instalace do Stremio</h2>
-                    ${ADDON_API_KEY ? `
-                        ${!hasApiKey ? `
-                            <div class="error">
-                                <h3>🔑 API klíč je povinný!</h3>
-                                <p>Doplněk vyžaduje platný API klíč pro všechny operace včetně instalace.</p>
-                                <p><strong>Bez API klíče doplněk nebude fungovat!</strong></p>
-                            </div>
-                        ` : ''}
-
-                        <p><strong>URL pro instalaci s API klíčem:</strong></p>
-                        <code>${req.protocol}://${req.get('host')}/manifest.json?api_key=VÁŠ_KLÍČ</code>
-                        <br><br>
-                        <p><strong>⚠️ Důležité:</strong> Nahraďte "VÁŠ_KLÍČ" vaším skutečným API klíčem</p>
-
-                        ${hasApiKey ? `
-                            <br>
-                            <a href="/manifest.json?api_key=${req.query.api_key}" class="install-button">📋 Otevřít manifest</a>
-                            <a href="stremio://${req.get('host')}/manifest.json?api_key=${req.query.api_key}" class="install-button">⚡ Instalovat do Stremio</a>
-                        ` : `
-                            <br>
-                            <button class="install-button" disabled>🔒 Instalace vyžaduje API klíč</button>
-                        `}
-                    ` : `
-                        <div class="warning">
-                            <strong>REŽIM VÝVOJE</strong><br>
-                            API klíč není nastaven. Doplněk je přístupný všem.
-                        </div>
-                        <code>${req.protocol}://${req.get('host')}/manifest.json</code>
-                        <br><br>
-                        <a href="/manifest.json" class="install-button">📋 Otevřít manifest</a>
-                    `}
-                </div>
-
-                <h2>🔧 Stav konfigurace</h2>
-                <div class="status-grid">
-                    <div class="status-card ${ADDON_API_KEY ? 'status-active' : 'status-inactive'}">
-                        <div class="emoji">${ADDON_API_KEY ? '🔐' : '⚠️'}</div>
-                        <h3>API Key Security</h3>
-                        <p>${ADDON_API_KEY ? 'Aktivní - doplněk je chráněný' : 'NENÍ NASTAVENO - nezabezpečeno!'}</p>
-                    </div>
-                    <div class="status-card ${rd ? 'status-active' : 'status-inactive'}">
-                        <div class="emoji">${rd ? '✅' : '❌'}</div>
-                        <h3>Real-Debrid</h3>
-                        <p>${rd ? 'Aktivní a připraveno' : 'Není nakonfigurováno'}</p>
-                    </div>
-                    <div class="status-card ${SKT_UID ? 'status-active' : 'status-inactive'}">
-                        <div class="emoji">${SKT_UID ? '✅' : '❌'}</div>
-                        <h3>SKTorrent.eu</h3>
-                        <p>${SKT_UID ? 'Přihlášení aktivní' : 'Chybí přihlašovací údaje'}</p>
-                    </div>
-                    <div class="status-card status-active">
-                        <div class="emoji">🎭</div>
-                        <h3>Proxy Streaming</h3>
-                        <p>Aktivní - všechny streamy přes server</p>
-                    </div>
-                </div>
-
-                <hr>
-
-                <div class="footer">
-                    <p><strong>Powered by:</strong> Proxy streaming + Duální zobrazení + Real-Debrid API + Zabezpečení</p>
-                </div>
-            </div>
-        </body>
-        </html>
-    `);
-});
-
-// PROXY ENDPOINT s kompletně přepracovaným streamováním místo redirectu
-app.get('/process/:infoHash', async (req, res) => {
-    const { infoHash } = req.params;
-    const now = Date.now();
-
+    const hasApiKey = req.query.api_key === config.ADDON_API_KEY;
+    const baseUrl = getBaseUrl();
+    const templateConfig = {
+        hasApiKey,
+        baseUrl,
+        ...config,
+        rd,
+        RATE_LIMIT_MAX: authManager.RATE_LIMIT_MAX
+    };
+    let stats = {};
     try {
-        console.log(`🚀 Real-Debrid PROXY požadavek pro: ${infoHash}`);
+        stats = {
+            ...authManager.getStats(),
+            ...streamingManager.getStats(),
+            ...baseUrlManager.getStats(),
+            authSessions: authManager.sessions ? authManager.sessions.size : 0,
+            activeProcessing: streamingManager.activeProcessing ? streamingManager.activeProcessing.size : 0
+        };
+    } catch (e) {
+        stats = {};
+    }
+    res.send(TemplateManager.generateHomePage(req, templateConfig, stats));
+});
 
-        // 1. Kontrola lokální cache s PROXY streamováním
-        const cached = rdCache.get(infoHash);
-        if (cached && cached.expiresAt > now && cached.links) {
-            console.log(`🎯 Lokální cache HIT pro ${infoHash} - PROXY streaming`);
-
-            try {
-                const streamResponse = await axios.get(cached.links[0].url, {
-                    responseType: 'stream',
-                    timeout: 30000,
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Range': req.headers.range || 'bytes=0-'
-                    }
-                });
-
-                // Nastavit headers pro proxy stream
-                res.set({
-                    'Content-Type': streamResponse.headers['content-type'] || 'video/mp4',
-                    'Content-Length': streamResponse.headers['content-length'],
-                    'Accept-Ranges': 'bytes',
-                    'Cache-Control': 'no-cache'
-                });
-
-                // Pokud je Range request, nastavit správný status a headers
-                if (req.headers.range && streamResponse.status === 206) {
-                    res.status(206);
-                    res.set('Content-Range', streamResponse.headers['content-range']);
-                }
-
-                console.log(`🔄 Cache PROXY streaming spuštěn pro ${infoHash}`);
-
-                // Proxy stream data přes server
-                streamResponse.data.pipe(res);
-
-                // Error handling pro stream
-                streamResponse.data.on('error', (error) => {
-                    console.error(`❌ Chyba cache proxy streamu: ${error.message}`);
-                    if (!res.headersSent) {
-                        res.status(500).json({ error: 'Chyba proxy streamu' });
-                    }
-                });
-
-                return;
-
-            } catch (proxyError) {
-                console.error(`❌ Cache proxy stream chyba: ${proxyError.message}`);
-                return res.status(503).json({
-                    error: 'Chyba proxy streamování z cache',
-                    message: 'Zkuste znovu nebo použijte Direct Torrent stream'
-                });
-            }
+// Endpoint pro streaming s timeoutem
+app.all('/process/:infoHash', async (req, res) => {
+    const { infoHash } = req.params;
+    let finished = false;
+    const timeout = setTimeout(() => {
+        if (!finished && !res.headersSent) {
+            finished = true;
+            res.status(504).json({ error: 'Gateway Timeout', infoHash });
         }
-
-        // 2. Kontrola aktivního zpracování
-        if (activeProcessing.has(infoHash)) {
-            console.log(`⏳ Čekám na aktivní zpracování pro ${infoHash}`);
-            try {
-                const result = await activeProcessing.get(infoHash);
-                if (result && result.length > 0) {
-                    console.log(`✅ Aktivní zpracování dokončeno pro ${infoHash} - PROXY streaming`);
-
-                    try {
-                        const streamResponse = await axios.get(result[0].url, {
-                            responseType: 'stream',
-                            timeout: 30000,
-                            headers: {
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                                'Range': req.headers.range || 'bytes=0-'
-                            }
-                        });
-
-                        res.set({
-                            'Content-Type': streamResponse.headers['content-type'] || 'video/mp4',
-                            'Content-Length': streamResponse.headers['content-length'],
-                            'Accept-Ranges': 'bytes',
-                            'Cache-Control': 'no-cache'
-                        });
-
-                        if (req.headers.range && streamResponse.status === 206) {
-                            res.status(206);
-                            res.set('Content-Range', streamResponse.headers['content-range']);
-                        }
-
-                        console.log(`🔄 Aktivní PROXY streaming spuštěn pro ${infoHash}`);
-                        return streamResponse.data.pipe(res);
-
-                    } catch (proxyError) {
-                        console.error(`❌ Aktivní proxy stream chyba: ${proxyError.message}`);
-                        return res.status(503).json({
-                            error: 'Chyba proxy streamování z aktivního zpracování',
-                            message: 'Zkuste znovu nebo použijte Direct Torrent stream'
-                        });
-                    }
-                }
-            } catch (error) {
-                console.log(`❌ Aktivní zpracování selhalo: ${error.message}`);
-                activeProcessing.delete(infoHash);
-            }
+    }, 2 * 60 * 1000);
+    try {
+        const url = await streamingManager.processRealDebridStream(infoHash, rd, rdApiKey, req, res);
+        if (!finished && url) {
+            finished = true;
+            clearTimeout(timeout);
+            return streamingManager.streamFromUrl(url, req, res, 'RD');
         }
-
-        // 3. Nové zpracování s RD API
-        const magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
-        const processingPromise = rdProcessor.addMagnetIfNotExists(magnetLink, infoHash, 2);
-        activeProcessing.set(infoHash, processingPromise);
-
-        try {
-            const rdLinks = await processingPromise;
-            activeProcessing.delete(infoHash);
-
-            if (rdLinks && rdLinks.length > 0) {
-                // Uložit do cache
-                rdCache.set(infoHash, {
-                    timestamp: now,
-                    links: rdLinks,
-                    expiresAt: now + CACHE_DURATION
-                });
-
-                console.log(`✅ RD zpracování úspěšné pro ${infoHash} - PROXY streaming`);
-
-                try {
-                    const streamResponse = await axios.get(rdLinks[0].url, {
-                        responseType: 'stream',
-                        timeout: 30000,
-                        headers: {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                            'Range': req.headers.range || 'bytes=0-'
-                        }
-                    });
-
-                    res.set({
-                        'Content-Type': streamResponse.headers['content-type'] || 'video/mp4',
-                        'Content-Length': streamResponse.headers['content-length'],
-                        'Accept-Ranges': 'bytes',
-                        'Cache-Control': 'no-cache'
-                    });
-
-                    if (req.headers.range && streamResponse.status === 206) {
-                        res.status(206);
-                        res.set('Content-Range', streamResponse.headers['content-range']);
-                    }
-
-                    console.log(`🔄 Nové PROXY streaming spuštěn pro ${infoHash}`);
-
-                    // Proxy stream data přes server
-                    streamResponse.data.pipe(res);
-
-                    // Error handling pro stream
-                    streamResponse.data.on('error', (error) => {
-                        console.error(`❌ Chyba nového proxy streamu: ${error.message}`);
-                        if (!res.headersSent) {
-                            res.status(500).json({ error: 'Chyba proxy streamu' });
-                        }
-                    });
-
-                    return;
-
-                } catch (proxyError) {
-                    console.error(`❌ Nový proxy stream chyba: ${proxyError.message}`);
-                    return res.status(503).json({
-                        error: 'Chyba proxy streamování z nového zpracování',
-                        message: 'Zkuste znovu nebo použijte Direct Torrent stream'
-                    });
-                }
-            }
-        } catch (error) {
-            activeProcessing.delete(infoHash);
-            console.error(`❌ RD zpracování selhalo: ${error.message}`);
+        if (!finished && !res.headersSent) {
+            finished = true;
+            clearTimeout(timeout);
+            res.status(404).json({ error: 'Stream není dostupný', infoHash });
         }
-
-        console.log(`⚠️ Real-Debrid zpracování se nezdařilo pro ${infoHash}`);
-        return res.status(503).json({
-            error: 'Real-Debrid zpracování se nezdařilo',
-            message: 'Zkuste Direct Torrent stream'
-        });
-
-    } catch (error) {
-        activeProcessing.delete(infoHash);
-        console.error(`❌ Chyba Real-Debrid zpracování: ${error.message}`);
-        return res.status(503).json({
-            error: 'Chyba Real-Debrid serveru',
-            message: 'Zkuste Direct Torrent stream'
-        });
+    } catch (e) {
+        if (!finished && !res.headersSent) {
+            finished = true;
+            clearTimeout(timeout);
+            res.status(500).json({ error: 'Server chyba', infoHash });
+        }
     }
 });
 
-// Cleanup rutina pro čištění cache a aktivních zpracování
-setInterval(() => {
-    const now = Date.now();
+// Pravidelný cleanup session a cache
+const smartCleanup = () => {
+    authManager.cleanupExpiredSessions();
+    streamingManager.cleanupCache();
+    baseUrlManager.cleanup();
+};
+setInterval(smartCleanup, 5 * 60 * 1000);
 
-    // Vyčistit expirovanou cache
-    for (const [infoHash, cached] of rdCache.entries()) {
-        if (cached.expiresAt <= now) {
-            rdCache.delete(infoHash);
-            console.log(`🧹 Vyčištěn expirovaný cache pro ${infoHash}`);
+// Asynchronní cleanup cache každých 60 minut
+function asyncCacheCleanup() {
+    const now = Date.now();
+    let cleanedSearch = 0, cleanedInfo = 0;
+    for (const [key, entry] of searchCache.cache.entries()) {
+        if (entry.expires <= now) {
+            searchCache.delete(key);
+            cleanedSearch++;
         }
     }
-
-    // Vyčistit staré zpracování (starší než 5 minut)
-    const oldProcessingLimit = now - (5 * 60 * 1000);
-    for (const [infoHash] of activeProcessing.entries()) {
-        activeProcessing.delete(infoHash);
-        console.log(`🧹 Vyčištěno dlouho běžící zpracování pro ${infoHash}`);
+    for (const [key, entry] of infoCache.cache.entries()) {
+        if (entry.expires <= now) {
+            infoCache.delete(key);
+            cleanedInfo++;
+        }
     }
-}, 60000); // Každou minutu
+    if (cleanedSearch || cleanedInfo) {
+        console.log(`🧹 Cache cleanup: search=${cleanedSearch}, info=${cleanedInfo}`);
+    }
+}
+setInterval(asyncCacheCleanup, 60 * 60 * 1000);
 
-// Převod addon na Express router
 const addonRouter = getRouter(builder.getInterface());
 app.use('/', addonRouter);
 
-// Spuštění serveru
-app.listen(7000, () => {
-    console.log('🚀 SKTorrent Hybrid doplněk běží na http://localhost:7000/manifest.json');
-    console.log('🔧 RD PROXY Processor endpoint: /process/{infoHash}');
-    console.log(`🔧 Režim: ${rd ? 'Dual (RD + Torrent)' : 'Pouze Torrent'}`);
-    console.log(`🎮 Režim streamování: ${STREAM_MODE}`);
-    console.log(`🔐 Zabezpečení: ${ADDON_API_KEY ? 'Chráněno API klíčem' : 'NEZABEZPEČENO - API klíč není nastaven'}`);
+app.listen(7001, '0.0.0.0', () => {
+    console.log('🚀 SKTorrent Hybrid Pro v1.0.0 Modular běží na http://0.0.0.0:7001');
+    console.log(`🔧 Režim: ${rd ? 'Dual (RD + Torrent)' : 'Pouze Torrent'} | Stream: ${config.STREAM_MODE}`);
+    console.log(`🔐 Zabezpečení: ${config.ADDON_API_KEY ? 'API klíč aktivní' : 'VÝVOJOVÝ REŽIM'}`);
+    console.log(`🛡️ Rate limit: ${authManager.RATE_LIMIT_MAX} req/hod`);
+    console.log(`📦 Moduly: 6 načteno | ⚡ Connection pooling aktivní`);
+    console.log('⏰ Request timeout: 30s pro streaming endpointy');
+    console.log('🔍 Debug endpoint dostupný na /debug/:infoHash');
 });
