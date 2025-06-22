@@ -1,4 +1,5 @@
 const diacritics = require('diacritics');
+const parseTorrent = require('parse-torrent');
 
 const removeDiacritics = str => diacritics.remove(str);
 
@@ -69,6 +70,7 @@ module.exports = {
     extractQuality,
     validateInfoHash,
     handleApiError,
-    generateSearchQueries
+    generateSearchQueries,
+    parseTorrent // export pro jednotné použití
 };
 

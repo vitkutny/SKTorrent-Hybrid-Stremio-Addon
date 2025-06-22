@@ -10,6 +10,7 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const { getBaseUrl } = require('./base-url-manager');
+const parseTorrent = require('parse-torrent');
 
 // Vždy používej baseUrl z EXTERNAL_DOMAIN
 const baseUrl = getBaseUrl();
@@ -378,6 +379,17 @@ function buildMagnetLink(infoHash, name, size, trackers) {
         magnetLink += '&' + params.join('&');
     }
     return magnetLink;
+}
+
+// Nová funkce pro generování magnet linku z .torrent objektu pomocí parse-torrent
+function buildMagnetLinkFromTorrentBuffer(torrentBuffer) {
+    try {
+        const parsed = parseTorrent(torrentBuffer);
+        return parseTorrent.toMagnetURI(parsed);
+    } catch (e) {
+        console.error('Chyba při generování magnet linku z torrentu:', e.message);
+        return null;
+    }
 }
 
 // Handler pro streamy

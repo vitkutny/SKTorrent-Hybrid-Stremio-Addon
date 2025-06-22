@@ -1,4 +1,5 @@
 const axios = require('axios');
+const parseTorrent = require('parse-torrent');
 
 // --- LRU cache pro HEAD dotazy a chybové stavy RD ---
 function createLRUCache(maxSize = 300) {
