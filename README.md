@@ -389,8 +389,7 @@ sktorrent-hybrid-stremio-addon/
 ├── docker-compose.yaml         # Docker Compose orchestrace
 ├── LICENSE                     # Licence
 ├── README.md                   # Tento soubor
-├── sktorrent-addon-logo.png    # Logo addonu
-└── vercel.json                 # (volitelné, pro nasazení na Vercel)
+└── sktorrent-addon-logo.png    # Logo addonu
 ```
 
 ## 🤝 Přispívání
