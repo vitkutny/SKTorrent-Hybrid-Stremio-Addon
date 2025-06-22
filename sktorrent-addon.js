@@ -34,6 +34,60 @@ const apiClient = axios.create({
 const streamingManager = new StreamingManager(apiClient);
 const { getRealDebridStreamUrl } = streamingManager;
 
+// ✅ NOVÁ CACHE pro propojení infoHash s původními torrent daty
+class TorrentDataCache {
+    constructor(maxSize = 1000) {
+        this.cache = new Map();
+        this.maxSize = maxSize;
+    }
+    
+    set(infoHash, torrentData) {
+        if (this.cache.has(infoHash)) this.cache.delete(infoHash);
+        this.cache.set(infoHash, {
+            ...torrentData,
+            cached: Date.now(),
+            expires: Date.now() + (30 * 60 * 1000) // 30 minut
+        });
+        
+        // Cleanup old entries
+        if (this.cache.size > this.maxSize) {
+            const firstKey = this.cache.keys().next().value;
+            this.cache.delete(firstKey);
+        }
+    }
+    
+    get(infoHash) {
+        const entry = this.cache.get(infoHash);
+        if (!entry) return null;
+        
+        if (entry.expires < Date.now()) {
+            this.cache.delete(infoHash);
+            return null;
+        }
+        
+        // Move to end (LRU)
+        this.cache.delete(infoHash);
+        this.cache.set(infoHash, entry);
+        return entry;
+    }
+    
+    cleanup() {
+        const now = Date.now();
+        let cleaned = 0;
+        for (const [key, entry] of this.cache.entries()) {
+            if (entry.expires <= now) {
+                this.cache.delete(key);
+                cleaned++;
+            }
+        }
+        if (cleaned > 0) {
+            console.log(`🧹 TorrentDataCache cleanup: ${cleaned} entries`);
+        }
+    }
+}
+
+const torrentDataCache = new TorrentDataCache();
+
 // Inicializace a výpis základních informací
 console.log(`🔧 Inicializace: RD=${!!rd}, Auth=${!!config.ADDON_API_KEY}, Mode=${config.STREAM_MODE}`);
 
@@ -104,13 +158,21 @@ app.get('/debug/:infoHash', async (req, res) => {
         if (!Utils.validateInfoHash(infoHash)) {
             return res.status(400).json({ error: 'Neplatný infoHash formát' });
         }
-        // Předáváme i rdApiKey!
+
+        const torrentSearchManager = {
+            searchTorrents: (query) => searchTorrents(query),
+            getTorrentInfo: (url) => getTorrentInfo(url),
+            getTitleFromIMDb: (imdbId) => getTitleFromIMDb(imdbId)
+        };
+
         const debugResult = await streamingManager.debugTorrent(
             infoHash,
-            { searchTorrents, getTorrentInfo, getTitleFromIMDb },
+            torrentSearchManager,
             rd,
-            rdApiKey
+            rdApiKey,
+            torrentDataCache
         );
+
         // HTML odpověď s výsledky analýzy
         const htmlResponse = `
 <!DOCTYPE html>
@@ -165,6 +227,12 @@ app.get('/debug/:infoHash', async (req, res) => {
     <div class="details">
         <h2>📋 Cache Data:</h2>
         <pre>${JSON.stringify(debugResult.cacheData, null, 2)}</pre>
+    </div>
+    ` : ''}
+    ${debugResult.torrentDataSize ? `
+    <div class="details">
+        <h2>📦 Torrent File Size:</h2>
+        <p>${debugResult.torrentDataSize} bytes</p>
     </div>
     ` : ''}
     <div class="details">
@@ -353,46 +421,7 @@ const getTorrentInfoCached = async (url) => {
     return info;
 };
 
-// Pomocná funkce pro sestavení magnet linku s parametry
-function buildMagnetLink(infoHash, name, size, trackers) {
-    let magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
-    const params = [];
-    if (name) {
-        const safeName = encodeURIComponent(name.replace(/[\r\n\0]/g, '').slice(0, 255));
-        params.push(`dn=${safeName}`);
-    }
-    if (size && !isNaN(Number(size))) {
-        params.push(`xl=${Number(size)}`);
-    }
-    if (Array.isArray(trackers)) {
-        trackers.forEach(tr => {
-            if (typeof tr === 'string' && tr.startsWith('http')) {
-                params.push(`tr=${encodeURIComponent(tr)}`);
-            }
-        });
-    } else {
-        // fallback tracker
-        const tracker = 'http://sktorrent.eu/torrent/announce.php';
-        params.push(`tr=${encodeURIComponent(tracker)}`);
-    }
-    if (params.length > 0) {
-        magnetLink += '&' + params.join('&');
-    }
-    return magnetLink;
-}
-
-// Nová funkce pro generování magnet linku z .torrent objektu pomocí parse-torrent
-function buildMagnetLinkFromTorrentBuffer(torrentBuffer) {
-    try {
-        const parsed = parseTorrent(torrentBuffer);
-        return parseTorrent.toMagnetURI(parsed);
-    } catch (e) {
-        console.error('Chyba při generování magnet linku z torrentu:', e.message);
-        return null;
-    }
-}
-
-// Handler pro streamy
+// ✅ Handler pro streamy - ZACHOVÁNO pro Stremio kompatibilitu, RD používá torrent soubory
 builder.defineStreamHandler(async ({ type, id }, req) => {
     console.log(`\n====== 🎮 STREAM pro ${type}:${id} ======`);
     const [imdbId, sRaw, eRaw] = id.split(":");
@@ -411,7 +440,7 @@ builder.defineStreamHandler(async ({ type, id }, req) => {
     }
 
     const streams = [];
-    
+
     // Správná baseUrl pro streamy
     const currentBaseUrl = baseUrl;
     if (!currentBaseUrl) {
@@ -446,6 +475,22 @@ builder.defineStreamHandler(async ({ type, id }, req) => {
         const torrent = torrents[i];
         const torrentInfo = torrentInfos[i];
         if (!torrentInfo) continue;
+        
+        // ✅ KLÍČOVÁ OPRAVA: Uložení původního torrentu do cache
+        torrentDataCache.set(torrentInfo.infoHash, {
+            originalTorrent: torrent,
+            torrentInfo: torrentInfo,
+            searchContext: {
+                query: queries[0], // Původní query
+                title,
+                originalTitle,
+                type,
+                season,
+                episode
+            }
+        });
+        console.log(`💾 Cached torrent data pro ${torrentInfo.infoHash}: ${torrent.name}`);
+        
         let cleanedTitle = torrent.name.replace(/^Stiahni si\s*/i, "").trim();
         const categoryPrefix = torrent.category.trim().toLowerCase();
         if (cleanedTitle.toLowerCase().startsWith(categoryPrefix)) {
@@ -462,7 +507,7 @@ builder.defineStreamHandler(async ({ type, id }, req) => {
             streams.push({
                 name: `⚡ Real-Debrid\n${torrent.category}`,
                 title: `${cleanedTitle}\n👤 ${torrent.seeds}  📀 ${torrent.size}  🚀 Rychlé${flagsText}`,
-                url: processUrl,
+                url: processUrl, // ✅ URL pro RD processing (použije torrent soubor)
                 behaviorHints: { bingeGroup: `rd-${cleanedTitle}` }
             });
         }
@@ -470,7 +515,7 @@ builder.defineStreamHandler(async ({ type, id }, req) => {
             streams.push({
                 name: `🎬 Direct Torrent\n${torrent.category}`,
                 title: `${cleanedTitle}\n👤 ${torrent.seeds}  📀 ${torrent.size}  💾 Přímé${flagsText}`,
-                infoHash: torrentInfo.infoHash,
+                infoHash: torrentInfo.infoHash, // ✅ infoHash pro Stremio (magnet link)
                 behaviorHints: { bingeGroup: `torrent-${cleanedTitle}` }
             });
         }
@@ -501,9 +546,9 @@ app.get('/', (req, res) => {
         stats = {
             ...authManager.getStats(),
             ...streamingManager.getStats(),
-            ...baseUrlManager.getStats(),
             authSessions: authManager.sessions ? authManager.sessions.size : 0,
-            activeProcessing: streamingManager.activeProcessing ? streamingManager.activeProcessing.size : 0
+            activeProcessing: streamingManager.activeProcessing ? streamingManager.activeProcessing.size : 0,
+            torrentDataCache: torrentDataCache.cache.size
         };
     } catch (e) {
         stats = {};
@@ -511,23 +556,43 @@ app.get('/', (req, res) => {
     res.send(TemplateManager.generateHomePage(req, templateConfig, stats));
 });
 
-// Endpoint pro streaming s timeoutem
+// ✅ OPRAVENÝ endpoint pro streaming s předáním torrentDataCache - používá torrent soubory pro RD
 app.all('/process/:infoHash', async (req, res) => {
     const { infoHash } = req.params;
     let finished = false;
+
     const timeout = setTimeout(() => {
         if (!finished && !res.headersSent) {
             finished = true;
             res.status(504).json({ error: 'Gateway Timeout', infoHash });
         }
     }, 2 * 60 * 1000);
+
     try {
-        const url = await streamingManager.processRealDebridStream(infoHash, rd, rdApiKey, req, res);
+        const torrentSearchManager = {
+            searchTorrents: (query) => searchTorrents(query),
+            getTorrentInfo: (url) => getTorrentInfo(url),
+            getTitleFromIMDb: (imdbId) => getTitleFromIMDb(imdbId)
+        };
+
+        // ✅ processRealDebridStream nyní používá torrent soubory místo magnet linků
+        const url = await streamingManager.processRealDebridStream(
+            infoHash,
+            rd,
+            rdApiKey,
+            req,
+            res,
+            torrentSearchManager,
+            config,
+            torrentDataCache
+        );
+
         if (!finished && url) {
             finished = true;
             clearTimeout(timeout);
             return streamingManager.streamFromUrl(url, req, res, 'RD');
         }
+
         if (!finished && !res.headersSent) {
             finished = true;
             clearTimeout(timeout);
@@ -537,7 +602,7 @@ app.all('/process/:infoHash', async (req, res) => {
         if (!finished && !res.headersSent) {
             finished = true;
             clearTimeout(timeout);
-            res.status(500).json({ error: 'Server chyba', infoHash });
+            res.status(500).json({ error: 'Server chyba', infoHash, message: e.message });
         }
     }
 });
@@ -546,7 +611,7 @@ app.all('/process/:infoHash', async (req, res) => {
 const smartCleanup = () => {
     authManager.cleanupExpiredSessions();
     streamingManager.cleanupCache();
-    baseUrlManager.cleanup();
+    torrentDataCache.cleanup();
 };
 setInterval(smartCleanup, 5 * 60 * 1000);
 
@@ -583,4 +648,6 @@ app.listen(7000, '0.0.0.0', () => {
     console.log(`📦 Moduly: 6 načteno | ⚡ Connection pooling aktivní`);
     console.log('⏰ Request timeout: 30s pro streaming endpointy');
     console.log('🔍 Debug endpoint dostupný na /debug/:infoHash');
+    console.log('💾 TorrentDataCache aktivní pro propojení infoHash s původními torrenty');
+    console.log('📂 RD používá torrent soubory, Stremio používá magnet linky');
 });

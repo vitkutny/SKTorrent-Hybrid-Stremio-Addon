@@ -49,11 +49,148 @@ function createStreamingManager(apiClient) {
         return `${baseKey}_FULL`;
     }
 
+    // ✅ NOVÁ funkce pro získání torrent dat z cache
+    const getTorrentDataFromCache = async (infoHash, torrentSearchManager, config, torrentDataCache) => {
+        console.log(`📦 Získávám torrent data pro RD upload: ${infoHash}`);
+
+        if (!torrentDataCache) {
+            throw new Error(`TorrentDataCache není k dispozici pro ${infoHash}`);
+        }
+
+        const cachedData = torrentDataCache.get(infoHash);
+        if (!cachedData || !cachedData.originalTorrent) {
+            throw new Error(`Cached torrent data nenalezena pro ${infoHash} - stream handler možná selhal`);
+        }
+
+        console.log(`💾 Použiji POUZE cached torrent data: ${cachedData.originalTorrent.name}`);
+        console.log(`🔍 Cached context: ${cachedData.searchContext?.query} (${cachedData.searchContext?.type})`);
+
+        try {
+            // Stáhneme původní torrent soubor z cached URL
+            const { data } = await apiClient.get(cachedData.originalTorrent.downloadUrl, {
+                responseType: "arraybuffer",
+                headers: {
+                    Cookie: `uid=${config.SKT_UID}; pass=${config.SKT_PASS}`,
+                    Referer: config.BASE_URL || 'https://sktorrent.eu',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+
+            // ✅ Ověření, že je to správný torrent
+            const parsed = parseTorrent(data);
+            console.log(`🎯 InfoHash check: očekávaný=${infoHash}, skutečný=${parsed.infoHash}`);
+            
+            if (parsed.infoHash.toLowerCase() !== infoHash.toLowerCase()) {
+                throw new Error(`InfoHash mismatch: očekávaný ${infoHash}, ale torrent má ${parsed.infoHash}`);
+            }
+            
+            console.log(`✅ Torrent data úspěšně získána pro RD upload (${data.byteLength} bytes)`);
+            return data; // Vrátí Buffer s torrent daty
+            
+        } catch (error) {
+            console.error(`❌ Chyba při získávání torrent dat z cached URL: ${error.message}`);
+            throw error;
+        }
+    };
+
+    // ✅ ZACHOVANÁ funkce buildCompleteMagnetLink pro Stremio kompatibilitu
+    const buildCompleteMagnetLink = async (infoHash, torrentSearchManager, config, torrentDataCache) => {
+        console.log(`🧲 Sestavuji kompletní magnet link pro ${infoHash}`);
+
+        if (!torrentDataCache) {
+            throw new Error(`TorrentDataCache není k dispozici pro ${infoHash}`);
+        }
+
+        const cachedData = torrentDataCache.get(infoHash);
+        if (!cachedData || !cachedData.originalTorrent) {
+            throw new Error(`Cached torrent data nenalezena pro ${infoHash} - stream handler možná selhal`);
+        }
+
+        console.log(`💾 Použiji POUZE cached torrent data: ${cachedData.originalTorrent.name}`);
+        console.log(`🔍 Cached context: ${cachedData.searchContext?.query} (${cachedData.searchContext?.type})`);
+
+        try {
+            // Stáhneme původní torrent soubor z cached URL
+            const { data } = await apiClient.get(cachedData.originalTorrent.downloadUrl, {
+                responseType: "arraybuffer",
+                headers: {
+                    Cookie: `uid=${config.SKT_UID}; pass=${config.SKT_PASS}`,
+                    Referer: config.BASE_URL || 'https://sktorrent.eu',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+
+            // ✅ Použití parse-torrent pro parsování
+            const parsed = parseTorrent(data);
+            
+            console.log(`🔍 Parsed torrent data:`, {
+                infoHash: parsed.infoHash,
+                name: parsed.name,
+                length: parsed.length,
+                announceLength: parsed.announce?.length,
+                files: parsed.files?.length
+            });
+            
+            // ✅ SPRÁVNÉ pořadí parametrů jako ve vašem externím magnet linku
+            const magnetParams = [];
+            
+            // ✅ xl parametr PRVNÍ
+            if (parsed.length) {
+                magnetParams.push(`xl=${parsed.length}`);
+                console.log(`📏 Přidávám xl parametr jako první: ${parsed.length} bytes`);
+            }
+            
+            // Potom xt parametr
+            magnetParams.push(`xt=urn:btih:${parsed.infoHash}`);
+            
+            // Display name
+            if (parsed.name) {
+                magnetParams.push(`dn=${encodeURIComponent(parsed.name)}`);
+            }
+            
+            // Trackery
+            if (parsed.announce && parsed.announce.length > 0) {
+                parsed.announce.forEach(tracker => {
+                    magnetParams.push(`tr=${encodeURIComponent(tracker)}`);
+                });
+            }
+            
+            // Sestavení finálního magnet linku
+            const completeMagnet = `magnet:?${magnetParams.join('&')}`;
+            
+            console.log(`✅ Kompletní magnet link sestaven s xl parametrem na první pozici`);
+            console.log(`🎯 InfoHash check: očekávaný=${infoHash}, skutečný=${parsed.infoHash}`);
+            console.log(`📏 Velikost: ${parsed.length} bytes`);
+            
+            // ✅ Kontrola, že xl parametr je na první pozici
+            if (completeMagnet.startsWith(`magnet:?xl=${parsed.length}&xt=`)) {
+                console.log(`✅ xl parametr správně na první pozici: xl=${parsed.length}`);
+            } else {
+                console.error(`❌ xl parametr není na první pozici!`);
+            }
+            
+            console.log(`🧲 Finální magnet: ${completeMagnet.substring(0, 120)}...`);
+            
+            // ✅ Dodatečná kontrola, že hash sedí
+            if (parsed.infoHash.toLowerCase() !== infoHash.toLowerCase()) {
+                throw new Error(`InfoHash mismatch: očekávaný ${infoHash}, ale torrent má ${parsed.infoHash}`);
+            }
+            
+            return completeMagnet;
+            
+        } catch (error) {
+            console.error(`❌ Chyba při sestavování magnet linku z cached dat: ${error.message}`);
+            throw error;
+        }
+    };
+
+    // ✅ OPRAVENÁ streamFromUrl funkce s lepším error handlingem
     async function streamFromUrl(url, req, res, source) {
         const streamKey = getStreamKey(req, url);
         const baseKey = `${req.ip}_${url}`;
         const { range } = req.headers;
         const isRangeRequest = range && range.includes('bytes=');
+
         if (!isRangeRequest && activeStreams.has(`${baseKey}_FULL`)) {
             const existingStream = activeStreams.get(`${baseKey}_FULL`);
             if (Date.now() - existingStream < 5000) {
@@ -61,54 +198,144 @@ function createStreamingManager(apiClient) {
                 return;
             }
         }
+
         try {
             activeStreams.set(streamKey, Date.now());
             console.log(`🔄 Spouštím ${source} stream: ${req.method} ${range ? `Range: ${range}` : 'FULL'}`);
-            const { headers, data, status } = await apiClient.get(url, {
-                responseType: 'stream',
-                headers: { 'Range': range || 'bytes=0-' }
+            console.log(`🌐 Stream URL: ${url}`);
+
+            // ✅ OPRAVA: Nejprve zkontroluj URL dostupnost
+            let response;
+            try {
+                response = await apiClient.get(url, {
+                    responseType: 'stream',
+                    headers: { 
+                        'Range': range || 'bytes=0-',
+                        'User-Agent': 'SKTorrent-Hybrid/1.0.0'
+                    },
+                    timeout: 30000,
+                    validateStatus: function (status) {
+                        return status >= 200 && status < 400; // Povolí redirects
+                    }
+                });
+            } catch (urlError) {
+                console.error(`❌ Chyba při načítání URL: ${urlError.message}`);
+                if (urlError.response) {
+                    console.error(`📋 Status: ${urlError.response.status}, Headers:`, urlError.response.headers);
+                }
+                throw urlError;
+            }
+
+            const { headers, data, status } = response;
+            
+            // ✅ OPRAVA: Debug response headers
+            console.log(`📊 Response status: ${status}`);
+            console.log(`📋 Response headers:`, {
+                'content-type': headers['content-type'],
+                'content-length': headers['content-length'],
+                'content-range': headers['content-range'],
+                'accept-ranges': headers['accept-ranges']
             });
+
             const responseHeaders = {
                 'Content-Type': headers['content-type'] || 'video/mp4',
                 'Accept-Ranges': 'bytes',
                 'Cache-Control': 'no-cache, no-store',
-                'Connection': 'keep-alive',
-                ...(headers['content-length'] && { 'Content-Length': headers['content-length'] })
+                'Connection': 'keep-alive'
             };
+
+            // ✅ OPRAVA: Lepší handling Content-Length
+            if (headers['content-length']) {
+                responseHeaders['Content-Length'] = headers['content-length'];
+                console.log(`📏 Content-Length: ${headers['content-length']} bytes`);
+            } else {
+                console.warn(`⚠️ Content-Length chybí v response headers`);
+            }
+
             if (range && status === 206) {
                 res.status(206);
-                if (headers['content-range']) responseHeaders['Content-Range'] = headers['content-range'];
-                console.log(`📍 Range stream: ${headers['content-range']}`);
+                if (headers['content-range']) {
+                    responseHeaders['Content-Range'] = headers['content-range'];
+                    console.log(`📍 Range stream: ${headers['content-range']}`);
+                } else {
+                    console.warn(`⚠️ Content-Range chybí pro 206 response`);
+                }
             } else {
                 res.status(200);
-                console.log(`📺 Full stream: ${responseHeaders['Content-Length']} bytes`);
+                console.log(`📺 Full stream: ${responseHeaders['Content-Length'] || 'unknown size'} bytes`);
             }
+
             res.set(responseHeaders);
-            data.pipe(res);
+
+            // ✅ OPRAVA: Lepší stream handling s error listenery
+            let streamEnded = false;
             const cleanup = () => {
-                activeStreams.delete(streamKey);
-                console.log(`🧹 Stream cleanup: ${streamKey}`);
+                if (!streamEnded) {
+                    streamEnded = true;
+                    activeStreams.delete(streamKey);
+                    console.log(`🧹 Stream cleanup: ${streamKey}`);
+                }
             };
+
+            // ✅ OPRAVA: Error handling před pipe
             data.on('error', err => {
-                console.error(`❌ Stream error: ${err.message}`);
+                console.error(`❌ ${source} stream data error: ${err.message}`);
                 cleanup();
-                if (!res.headersSent) res.status(500).end();
+                if (!res.headersSent) {
+                    res.status(500).end();
+                } else if (!res.destroyed) {
+                    res.destroy();
+                }
             });
-            data.on('end', cleanup);
-            data.on('close', cleanup);
-            req.on('close', cleanup);
-            req.on('aborted', cleanup);
+
+            data.on('end', () => {
+                console.log(`✅ ${source} stream ended normally`);
+                cleanup();
+            });
+
+            data.on('close', () => {
+                console.log(`🔒 ${source} stream closed`);
+                cleanup();
+            });
+
+            req.on('close', () => {
+                console.log(`🔒 Client disconnected from ${source} stream`);
+                cleanup();
+                if (!data.destroyed) {
+                    data.destroy();
+                }
+            });
+
+            req.on('aborted', () => {
+                console.log(`🚫 Client aborted ${source} stream`);
+                cleanup();
+                if (!data.destroyed) {
+                    data.destroy();
+                }
+            });
+
+            // ✅ OPRAVA: Pipe s error handling
+            data.pipe(res).on('error', (err) => {
+                console.error(`❌ ${source} pipe error: ${err.message}`);
+                cleanup();
+            });
+
+            console.log(`🚀 ${source} stream pipeline nastavena úspěšně`);
+
         } catch (error) {
             activeStreams.delete(streamKey);
             console.error(`❌ ${source} proxy stream chyba: ${error.message}`);
+            console.error(`📋 Error stack: ${error.stack}`);
+            
             if (!res.headersSent) {
                 res.status(503).json({
                     error: `${source} proxy stream chyba`,
-                    message: error.message
+                    message: error.message,
+                    url: url // ✅ Debug info
                 });
             }
         }
-    };
+    }
 
     const getStreamHeaders = async (infoHash, rd, rdApiKey) => {
         const now = Date.now();
@@ -124,8 +351,10 @@ function createStreamingManager(apiClient) {
                     return await getUrlHeaders(url);
                 }
             }
+
             const magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
             const rdLinks = await rd.addMagnetIfNotExists(rdApiKey, magnetLink, infoHash, 1);
+
             if (rdLinks && rdLinks.length > 0) {
                 rdCache.set(infoHash, {
                     timestamp: now,
@@ -134,6 +363,7 @@ function createStreamingManager(apiClient) {
                 });
                 return await getUrlHeaders(rdLinks[0].url);
             }
+
             rdCache.set(infoHash, {
                 timestamp: now,
                 error: true,
@@ -160,6 +390,7 @@ function createStreamingManager(apiClient) {
     const getUrlHeaders = async (url) => {
         const cached = headCache.get(url);
         if (cached && cached.expires > Date.now()) return cached.value;
+
         try {
             const { headers } = await apiClient.head(url);
             const value = {
@@ -186,6 +417,7 @@ function createStreamingManager(apiClient) {
     const cacheRDError = (infoHash, message) => {
         rdErrorCache.set(infoHash, { error: true, message, expires: Date.now() + 5 * 60 * 1000 }); // 5 min
     };
+
     const getRDError = (infoHash) => {
         const cached = rdErrorCache.get(infoHash);
         if (cached && cached.expires > Date.now()) return cached;
@@ -193,140 +425,93 @@ function createStreamingManager(apiClient) {
         return null;
     };
 
-    const debugTorrent = async (infoHash, torrentSearchManager, rd, rdApiKey) => {
+    // ✅ OPRAVENÁ debugTorrent funkce s torrentDataCache
+    const debugTorrent = async (infoHash, torrentSearchManager, rd, rdApiKey, torrentDataCache) => {
         const debugInfo = {
             infoHash,
             timestamp: new Date().toISOString(),
             steps: []
         };
+
         try {
             debugInfo.steps.push('🔍 Začínám debug analýzu...');
-            debugInfo.steps.push('📊 Hledám torrent v SKTorrent databázi...');
-            const queries = ['The Accountant 2', 'Accountant 2', 'The Accountant'];
-            let foundTorrent = null;
-            for (const query of queries) {
-                debugInfo.steps.push(`🔎 Zkouším query: "${query}"`);
-                const torrents = await torrentSearchManager.searchTorrents(query);
-                for (const torrent of torrents) {
-                    debugInfo.steps.push(`📦 Kontroluji torrent: "${torrent.name}" (ID: ${torrent.id})`);
-                    const torrentInfo = await torrentSearchManager.getTorrentInfo(torrent.downloadUrl);
-                    if (torrentInfo && torrentInfo.infoHash === infoHash) {
-                        foundTorrent = { ...torrent, ...torrentInfo, downloadUrl: torrent.downloadUrl };
-                        debugInfo.steps.push(`✅ NALEZEN! Hash se shoduje: ${torrentInfo.infoHash}`);
-                        break;
-                    } else if (torrentInfo) {
-                        debugInfo.steps.push(`❌ Hash se neshoduje: očekávaný=${infoHash}, skutečný=${torrentInfo.infoHash}`);
-                    } else {
-                        debugInfo.steps.push(`❌ Nepodařilo se získat info z .torrent souboru`);
-                    }
-                }
-                if (foundTorrent) break;
-            }
-            if (!foundTorrent) {
-                debugInfo.steps.push('❌ Torrent nenalezen v SKTorrent!');
-                debugInfo.error = 'Torrent nenalezen';
-                return debugInfo;
-            }
-            debugInfo.steps.push('🔧 Analýza .torrent souboru...');
-            debugInfo.torrentDetails = {
-                sktId: foundTorrent.id,
-                sktName: foundTorrent.name,
-                sktCategory: foundTorrent.category,
-                sktSeeds: foundTorrent.seeds,
-                sktSize: foundTorrent.size,
-                downloadUrl: foundTorrent.downloadUrl,
-                internalName: foundTorrent.name,
-                calculatedHash: foundTorrent.infoHash
-            };
-            debugInfo.steps.push(`📋 SKT název: "${foundTorrent.name}"`);
-            debugInfo.steps.push(`📋 Interní název: "${foundTorrent.name}"`);
-            debugInfo.steps.push(`📋 Kategorie: "${foundTorrent.category}"`);
-            debugInfo.steps.push(`📋 Seeds: ${foundTorrent.seeds}`);
-            debugInfo.steps.push(`📋 Velikost: ${foundTorrent.size}`);
-            const name = foundTorrent.name;
-            const hasNonAscii = /[^\x00-\x7F]/.test(name);
-            const problematicChars = name.match(/[<>:"/\\|?*]/g);
-            debugInfo.steps.push(`🔍 Analýza názvu:`);
-            debugInfo.steps.push(`   Délka: ${name.length}`);
-            debugInfo.steps.push(`   Non-ASCII znaky: ${hasNonAscii ? '✅ ANO' : '❌ NE'}`);
-            debugInfo.steps.push(`   Problematické znaky: ${problematicChars ? problematicChars.join(', ') : 'žádné'}`);
-            // Sestav magnet link s parametry pokud jsou dostupné
-            let magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
-            if (foundTorrent) {
-                const params = [];
-                // Bezpečná validace a sanitizace názvu
-                if (foundTorrent.name) {
-                    const safeName = encodeURIComponent(foundTorrent.name.replace(/[\r\n\0]/g, '').slice(0, 255));
-                    params.push(`dn=${safeName}`);
-                }
-                // Velikost pouze číslo
-                if (foundTorrent.size && !isNaN(Number(foundTorrent.size))) {
-                    params.push(`xl=${Number(foundTorrent.size)}`);
-                }
-                // Trackery z pole
-                if (Array.isArray(foundTorrent.trackers)) {
-                    foundTorrent.trackers.forEach(tr => {
-                        if (typeof tr === 'string' && tr.startsWith('http')) {
-                            params.push(`tr=${encodeURIComponent(tr)}`);
-                        }
-                    });
-                } else if (foundTorrent.downloadUrl) {
-                    // fallback tracker
-                    const tracker = 'http://sktorrent.eu/torrent/announce.php';
-                    params.push(`tr=${encodeURIComponent(tracker)}`);
-                }
-                if (params.length > 0) {
-                    magnetLink += '&' + params.join('&');
+            
+            // ✅ Zkontroluj cached data
+            if (torrentDataCache) {
+                const cachedData = torrentDataCache.get(infoHash);
+                if (cachedData) {
+                    debugInfo.steps.push('💾 Nalezena cached torrent data!');
+                    debugInfo.cacheData = {
+                        originalTorrent: cachedData.originalTorrent,
+                        searchContext: cachedData.searchContext,
+                        cached: new Date(cachedData.cached).toISOString()
+                    };
+                    debugInfo.torrentDetails = {
+                        sktId: cachedData.originalTorrent.id,
+                        sktName: cachedData.originalTorrent.name,
+                        sktCategory: cachedData.originalTorrent.category,
+                        sktSeeds: cachedData.originalTorrent.seeds,
+                        sktSize: cachedData.originalTorrent.size,
+                        downloadUrl: cachedData.originalTorrent.downloadUrl,
+                        calculatedHash: cachedData.torrentInfo.infoHash
+                    };
+                } else {
+                    debugInfo.steps.push('❌ Žádná cached data nenalezena');
                 }
             }
-            debugInfo.magnetLink = magnetLink;
-            debugInfo.steps.push(`🧲 Magnet link: ${magnetLink}`);
-            if (rd) {
-                debugInfo.steps.push('🔄 Testování Real-Debrid...');
+
+            // ✅ Testování torrent dat pro RD
+            debugInfo.steps.push('📦 Zkouším získat torrent data pro RD...');
+            try {
+                const torrentData = await getTorrentDataFromCache(infoHash, torrentSearchManager, {
+                    SKT_UID: process.env.SKT_UID,
+                    SKT_PASS: process.env.SKT_PASS,
+                    BASE_URL: process.env.BASE_URL || 'https://sktorrent.eu'
+                }, torrentDataCache);
+                debugInfo.steps.push(`✅ Torrent data získána (${torrentData.byteLength} bytes)`);
+                debugInfo.torrentDataSize = torrentData.byteLength;
+            } catch (torrentError) {
+                debugInfo.steps.push(`❌ Chyba při získávání torrent dat: ${torrentError.message}`);
+                debugInfo.torrentError = torrentError.message;
+            }
+
+            // ✅ Sestavení magnet linku pro Stremio kompatibilitu
+            debugInfo.steps.push('🧲 Sestavuji magnet link pro Stremio...');
+            try {
+                const completeMagnet = await buildCompleteMagnetLink(infoHash, torrentSearchManager, {
+                    SKT_UID: process.env.SKT_UID,
+                    SKT_PASS: process.env.SKT_PASS,
+                    BASE_URL: process.env.BASE_URL || 'https://sktorrent.eu'
+                }, torrentDataCache);
+                debugInfo.magnetLink = completeMagnet;
+                debugInfo.steps.push(`🧲 Magnet link: ${completeMagnet}`);
+            } catch (magnetError) {
+                debugInfo.steps.push(`❌ Chyba při sestavování magnet linku: ${magnetError.message}`);
+                debugInfo.magnetError = magnetError.message;
+            }
+
+            if (rd && debugInfo.torrentDataSize) {
+                debugInfo.steps.push('🔄 Testování Real-Debrid s torrent souborem (PUT metoda)...');
                 try {
-                    const existing = await rd.checkExistingTorrent(rdApiKey, infoHash);
-                    debugInfo.rdStatus = existing;
-                    if (existing.exists) {
-                        debugInfo.steps.push(`✅ Torrent existuje v RD: ${existing.torrentId}`);
-                        debugInfo.steps.push(`📊 Status: ${existing.status}`);
-                        debugInfo.steps.push(`📈 Progress: ${existing.progress || 0}%`);
-                        if (existing.error) {
-                            debugInfo.steps.push(`❌ RD ERROR: ${existing.message}`);
-                            debugInfo.rdError = existing.message;
-                        }
-                        if (existing.links) {
-                            debugInfo.steps.push(`🔗 RD Links: ${existing.links.length} odkazů`);
-                            debugInfo.rdLinks = existing.links.slice(0, 3);
-                        }
+                    const torrentData = await getTorrentDataFromCache(infoHash, torrentSearchManager, {
+                        SKT_UID: process.env.SKT_UID,
+                        SKT_PASS: process.env.SKT_PASS,
+                        BASE_URL: process.env.BASE_URL || 'https://sktorrent.eu'
+                    }, torrentDataCache);
+                    
+                    const rdResult = await rd.addTorrentIfNotExists(rdApiKey, torrentData, infoHash);
+                    if (rdResult && rdResult.length > 0) {
+                        debugInfo.steps.push(`✅ Úspěšně přidáno do RD pomocí PUT metody!`);
+                        debugInfo.rdLinks = rdResult.slice(0, 3);
                     } else {
-                        debugInfo.steps.push('🆕 Torrent neexistuje v RD - nový torrent');
-                        debugInfo.steps.push('📥 Zkouším přidat do RD...');
-                        const rdResult = await rd.addMagnetIfNotExists(rdApiKey, magnetLink, infoHash, 1);
-                        if (rdResult && rdResult.length > 0) {
-                            debugInfo.steps.push(`✅ Úspěšně přidáno do RD!`);
-                            debugInfo.rdLinks = rdResult.slice(0, 3);
-                        } else {
-                            debugInfo.steps.push(`❌ Nepodařilo se přidat do RD`);
-                        }
+                        debugInfo.steps.push(`❌ Nepodařilo se přidat do RD`);
                     }
                 } catch (rdError) {
                     debugInfo.steps.push(`❌ RD API chyba: ${rdError.message}`);
                     debugInfo.rdError = rdError.message;
                 }
             }
-            const cached = rdCache.get(infoHash);
-            if (cached) {
-                debugInfo.steps.push('📋 Nalezen záznam v local cache:');
-                debugInfo.steps.push(`   Timestamp: ${new Date(cached.timestamp).toISOString()}`);
-                debugInfo.steps.push(`   Expires: ${new Date(cached.expiresAt).toISOString()}`);
-                debugInfo.steps.push(`   Valid: ${cached.expiresAt > Date.now()}`);
-                debugInfo.steps.push(`   Error: ${cached.error ? 'ANO' : 'NE'}`);
-                if (cached.error) debugInfo.steps.push(`   Error msg: ${cached.message}`);
-                if (cached.links) debugInfo.steps.push(`   Links: ${cached.links.length}`);
-                debugInfo.cacheData = cached;
-            } else {
-                debugInfo.steps.push('❌ Žádný záznam v local cache');
-            }
+
             debugInfo.steps.push('✅ Debug analýza dokončena!');
             debugInfo.success = true;
         } catch (error) {
@@ -334,22 +519,26 @@ function createStreamingManager(apiClient) {
             debugInfo.error = error.message;
             debugInfo.success = false;
         }
+
         return debugInfo;
     };
 
-    // --- POZOR: Tato funkce už nikdy nesmí streamovat ani posílat odpověď! ---
-    const processRealDebridStream = async (infoHash, rd, rdApiKey, req, res) => {
+    // ✅ HLAVNÍ OPRAVENÁ processRealDebridStream - používá PUT torrent upload
+    const processRealDebridStream = async (infoHash, rd, rdApiKey, req, res, torrentSearchManager, config, torrentDataCache) => {
         maybeCleanupCaches();
+
         // Zkontroluj RD error cache
         const cachedError = getRDError(infoHash);
         if (cachedError) {
             console.log(`❌ RD error cache hit pro ${infoHash}: ${cachedError.message}`);
             return null;
         }
+
         const now = Date.now();
         try {
             const rangeHeader = req.headers.range;
             console.log(`🚀 RD ${req.method} pro: ${infoHash}${rangeHeader ? ` Range: ${rangeHeader}` : ''}`);
+
             const cached = rdCache.get(infoHash);
             if (cached && cached.expiresAt > now) {
                 if (cached.error) {
@@ -361,6 +550,7 @@ function createStreamingManager(apiClient) {
                     return cached.links[0].url;
                 }
             }
+
             if (activeProcessing.has(infoHash)) {
                 console.log(`⏳ Čekám na aktivní zpracování ${infoHash}`);
                 try {
@@ -375,17 +565,29 @@ function createStreamingManager(apiClient) {
                     return null;
                 }
             }
+
             console.log(`🔄 NOVÉ RD zpracování pro ${infoHash}`);
-            const magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
-            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout při čekání na Real-Debrid (2 minuty)')), 2 * 60 * 1000));
+
+            // ✅ KLÍČOVÁ ZMĚNA: Získej pouze torrent data pro PUT upload
+            const torrentData = await getTorrentDataFromCache(infoHash, torrentSearchManager, config, torrentDataCache);
+            console.log(`📦 Torrent data připravena pro PUT upload (${torrentData.byteLength} bytes)`);
+
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Timeout při čekání na Real-Debrid (2 minuty)')), 2 * 60 * 1000)
+            );
+
+            // ✅ Volej pouze s torrent daty (PUT metoda)
             const processingPromise = Promise.race([
-                rd.addMagnetIfNotExists(rdApiKey, magnetLink, infoHash, 2),
+                rd.addTorrentIfNotExists(rdApiKey, torrentData, infoHash), // ✅ Pouze torrent data
                 timeoutPromise
             ]);
+
             activeProcessing.set(infoHash, processingPromise);
+
             try {
                 const rdLinks = await processingPromise;
                 activeProcessing.delete(infoHash);
+
                 if (rdLinks && rdLinks.length > 0) {
                     rdCache.set(infoHash, {
                         timestamp: now,
@@ -394,34 +596,35 @@ function createStreamingManager(apiClient) {
                     });
                     return rdLinks[0].url;
                 }
+
                 rdCache.set(infoHash, {
                     timestamp: now,
                     error: true,
-                    message: 'Torrent nelze zpracovat (magnet_error)',
+                    message: 'Torrent nelze zpracovat (PUT torrent error)',
                     expiresAt: now + CACHE_DURATION
                 });
                 return null;
             } catch (error) {
                 activeProcessing.delete(infoHash);
+                console.error(`❌ RD processing error: ${error.message}`);
                 return null;
             }
         } catch (error) {
             activeProcessing.delete(infoHash);
+            console.error(`❌ processRealDebridStream error: ${error.message}`);
             return null;
         }
     };
 
-    /**
-     * Vrátí streamovací URL pro RD, ale NEstreamuje do res!
-     * @returns {Promise<string|null>} RD streamovací URL nebo null při chybě/timeoutu
-     */
     const getRealDebridStreamUrl = async (infoHash, rd, rdApiKey, req) => {
         maybeCleanupCaches();
+
         const cachedError = getRDError(infoHash);
         if (cachedError) {
             console.log(`❌ RD error cache hit pro ${infoHash}: ${cachedError.message}`);
             return null;
         }
+
         const now = Date.now();
         try {
             const cached = rdCache.get(infoHash);
@@ -435,6 +638,7 @@ function createStreamingManager(apiClient) {
                     return cached.links[0].url;
                 }
             }
+
             if (activeProcessing.has(infoHash)) {
                 console.log(`⏳ Čekám na aktivní zpracování ${infoHash}`);
                 try {
@@ -449,17 +653,25 @@ function createStreamingManager(apiClient) {
                     return null;
                 }
             }
+
             console.log(`🔄 NOVÉ RD zpracování pro ${infoHash}`);
             const magnetLink = `magnet:?xt=urn:btih:${infoHash}`;
-            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout při čekání na Real-Debrid (2 minuty)')), 2 * 60 * 1000));
+
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Timeout při čekání na Real-Debrid (2 minuty)')), 2 * 60 * 1000)
+            );
+
             const processingPromise = Promise.race([
                 rd.addMagnetIfNotExists(rdApiKey, magnetLink, infoHash, 2),
                 timeoutPromise
             ]);
+
             activeProcessing.set(infoHash, processingPromise);
+
             try {
                 const rdLinks = await processingPromise;
                 activeProcessing.delete(infoHash);
+
                 if (rdLinks && rdLinks.length > 0) {
                     rdCache.set(infoHash, {
                         timestamp: now,
@@ -468,6 +680,7 @@ function createStreamingManager(apiClient) {
                     });
                     return rdLinks[0].url;
                 }
+
                 rdCache.set(infoHash, {
                     timestamp: now,
                     error: true,
@@ -490,16 +703,19 @@ function createStreamingManager(apiClient) {
         let cleanedCache = 0;
         let cleanedProcessing = 0;
         let cleanedStreams = 0;
+
         for (const [hash, cached] of rdCache.entries()) {
             if (cached.expiresAt <= now) {
                 rdCache.delete(hash);
                 cleanedCache++;
             }
         }
+
         for (const [infoHash] of activeProcessing.entries()) {
             activeProcessing.delete(infoHash);
             cleanedProcessing++;
         }
+
         const oldStreamLimit = now - (5 * 60 * 1000);
         for (const [streamKey, timestamp] of activeStreams.entries()) {
             if (timestamp < oldStreamLimit) {
@@ -507,6 +723,7 @@ function createStreamingManager(apiClient) {
                 cleanedStreams++;
             }
         }
+
         if (cleanedCache > 0 || cleanedProcessing > 0 || cleanedStreams > 0) {
             console.log(`🧹 Streaming cleanup: ${cleanedCache} cache, ${cleanedProcessing} processing, ${cleanedStreams} streams`);
         }
@@ -530,7 +747,9 @@ function createStreamingManager(apiClient) {
         processRealDebridStream,
         cleanupCache,
         getStats,
-        getRealDebridStreamUrl
+        getRealDebridStreamUrl,
+        buildCompleteMagnetLink,
+        getTorrentDataFromCache
     };
 }
 

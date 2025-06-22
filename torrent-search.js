@@ -1,7 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const bencode = require('bncode');
-const crypto = require('crypto');
+const parseTorrent = require('parse-torrent');
 const { decode } = require('entities');
 
 const searchTorrents = async (apiClient, config, query) => {
@@ -9,12 +8,18 @@ const searchTorrents = async (apiClient, config, query) => {
     try {
         const session = axios.create({
             ...apiClient.defaults,
-            headers: { 
+            headers: {
                 ...apiClient.defaults.headers,
-                Cookie: `uid=${config.SKT_UID}; pass=${config.SKT_PASS}` 
+                Cookie: `uid=${config.SKT_UID}; pass=${config.SKT_PASS}`,
+                Referer: config.BASE_URL,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
-        const { data } = await session.get(config.SEARCH_URL, { params: { search: query, category: 0 } });
+        
+        const { data } = await session.get(config.SEARCH_URL, { 
+            params: { search: query, category: 0 } 
+        });
+        
         const $ = cheerio.load(data);
         const results = [];
 
@@ -29,7 +34,7 @@ const searchTorrents = async (apiClient, config, query) => {
             const sizeMatch = fullBlock.match(/Velkost\s([^|]+)/i);
             const seedMatch = fullBlock.match(/Odosielaju\s*:\s*(\d+)/i);
 
-            if (!category.toLowerCase().includes("film") && 
+            if (!category.toLowerCase().includes("film") &&
                 !category.toLowerCase().includes("seri")) return;
 
             results.push({
@@ -52,33 +57,27 @@ const searchTorrents = async (apiClient, config, query) => {
 
 const getTorrentInfo = async (apiClient, config, url) => {
     try {
+        console.log(`🔍 Stahuji .torrent soubor: ${url}`);
+        
         const { data } = await apiClient.get(url, {
             responseType: "arraybuffer",
             headers: {
-                Cookie: `uid=${config.SKT_UID}; pass=${config.SKT_PASS}`,
-                Referer: config.BASE_URL
+                Cookie: `uid=${config.SKT_UID}; pass=${config.SKT_PASS}`, // ✅ Opraveno: cookies přidány
+                Referer: config.BASE_URL,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
-        const torrent = bencode.decode(data);
-        const info = bencode.encode(torrent.info);
-        const infoHash = crypto.createHash("sha1").update(info).digest("hex");
-
-        const trackers = [];
-        if (torrent.announce) trackers.push(torrent.announce.toString());
-        if (torrent['announce-list']) {
-            for (const arr of torrent['announce-list']) {
-                if (Array.isArray(arr)) {
-                    for (const tr of arr) trackers.push(tr.toString());
-                } else if (typeof arr === 'string' || Buffer.isBuffer(arr)) {
-                    trackers.push(arr.toString());
-                }
-            }
-        }
+        
+        // ✅ Použití parse-torrent pro konzistentní zpracování
+        const parsed = parseTorrent(data);
+        
+        console.log(`✅ Torrent zpracován: ${parsed.name} (${parsed.infoHash})`);
+        
         return {
-            infoHash,
-            name: torrent.info.name ? torrent.info.name.toString() : '',
-            size: torrent.info.length || null,
-            trackers
+            infoHash: parsed.infoHash,
+            name: parsed.name || '',
+            size: parsed.length || null,
+            trackers: parsed.announce || []
         };
     } catch (err) {
         console.error(`❌ Chyba při zpracování .torrent: ${err.message}`);
