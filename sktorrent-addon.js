@@ -110,10 +110,7 @@ const builder = addonBuilder({
     name: "SKTorrent-Hybrid",
     description: "SKTorrent-Hybrid - Modularizovaný Real-Debrid + Torrent addon s pokročilou bezpečností",
     types: ["movie", "series"],
-    catalogs: [
-        { type: "movie", id: "sktorrent-movie", name: "SKTorrent Filmy" },
-        { type: "series", id: "sktorrent-series", name: "SKTorrent Seriály" }
-    ],
+    catalogs: [],
     resources: ["stream"],
     idPrefixes: ["tt"]
 });
@@ -522,12 +519,6 @@ builder.defineStreamHandler(async ({ type, id }, req) => {
     }
     console.log(`✅ Odesílám ${streams.length} streamů (${config.STREAM_MODE})`);
     return { streams };
-});
-
-// Handler pro katalogy
-builder.defineCatalogHandler(({ type, id }) => {
-    console.log(`📚 Katalog ${type}:${id}`);
-    return { metas: [] };
 });
 
 // Hlavní stránka addonu
