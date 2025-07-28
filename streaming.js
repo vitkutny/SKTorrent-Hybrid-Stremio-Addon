@@ -592,7 +592,7 @@ function createStreamingManager(apiClient) {
                     rdCache.set(infoHash, {
                         timestamp: now,
                         links: rdLinks,
-                        expiresAt: now + CACHE_DURATION
+                        expiresAt: now + (rdLinks[0].cacheDuration ?? CACHE_DURATION),
                     });
                     return rdLinks[0].url;
                 }
@@ -676,7 +676,7 @@ function createStreamingManager(apiClient) {
                     rdCache.set(infoHash, {
                         timestamp: now,
                         links: rdLinks,
-                        expiresAt: now + CACHE_DURATION
+                        expiresAt: now + (rdLinks[0].cacheDuration ?? CACHE_DURATION),
                     });
                     return rdLinks[0].url;
                 }
