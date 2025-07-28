@@ -19,6 +19,7 @@ debug.html
 .env
 .env.local
 .env.*.local
+docker-compose.override.yaml
 
 # Zálohy a IDE súbory
 *.bak
