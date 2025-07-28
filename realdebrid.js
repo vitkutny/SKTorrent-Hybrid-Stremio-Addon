@@ -14,6 +14,8 @@ const createRDClient = (apiKey) => {
     });
 };
 
+const downloadingLink = {url: 'https://torrentio.strem.fun/videos/downloading_v2.mp4', cacheDuration: 60 * 1000};
+
 // ✅ Unrestrict funkce (zachována)
 const unrestrictLink = async (client, link) => {
     try {
@@ -274,6 +276,7 @@ const waitForTorrentCompletion = async (client, torrentId) => {
                 console.log(`🧲 Konvertuji torrent...`);
             } else if (torrent.status === 'downloading') {
                 console.log(`⬇️ Stahování probíhá...`);
+                return [downloadingLink];
             } else if (torrent.status === 'queued') {
                 console.log(`⏰ Ve frontě...`);
             }
@@ -293,6 +296,8 @@ const addTorrentIfNotExists = async (apiKey, torrentData, infoHash) => {
 
     try {
         console.log(`🔄 RD: Zpracovávám torrent ${infoHash}`);
+        let torrentId = undefined;
+        let torrentStatus = undefined;
 
         // 1. Zkontroluj existující torrenty
         try {
@@ -300,6 +305,11 @@ const addTorrentIfNotExists = async (apiKey, torrentData, infoHash) => {
             const existing = existingTorrents.data.find(t =>
                 t.hash && t.hash.toLowerCase() === infoHash.toLowerCase()
             );
+
+            if (existing?.status === 'downloading') {
+                console.log(`⬇️ Stahování probíhá...`);
+                return [downloadingLink];
+            }
 
             if (existing?.status === 'downloaded' && existing.links?.length > 0) {
                 console.log(`✅ Torrent již existuje: ${existing.id}`);
@@ -318,21 +328,29 @@ const addTorrentIfNotExists = async (apiKey, torrentData, infoHash) => {
                     return unrestrictedLinks;
                 }
             }
+
+            torrentId = existing?.id;
+            torrentStatus = existing?.status;
         } catch (error) {
             console.warn(`⚠️ Chyba při kontrole existujících: ${error.message}`);
         }
 
-        // 2. ✅ Přidej torrent soubor pomocí PUT
-        console.log(`📤 Přidávám torrent soubor pomocí PUT metody`);
-        const addResult = await addTorrentFile(apiKey, torrentData, infoHash);
-        const torrentId = addResult.id;
+        if (torrentId === undefined) {
+            // 2. ✅ Přidej torrent soubor pomocí PUT
+            console.log(`📤 Přidávám torrent soubor pomocí PUT metody`);
+            const addResult = await addTorrentFile(apiKey, torrentData, infoHash);
+            torrentId = addResult.id;
+            torrentStatus = 'waiting_files_selection';
+        }
 
-        // 3. ✅ Inteligentní výběr pouze video souborů
-        console.log(`🎬 Vybírám video soubory pomocí inteligentní analýzy...`);
-        const selectedFile = await selectTorrentFiles(client, torrentId);
-        
-        if (selectedFile) {
-            console.log(`🎯 Vybraný soubor: ${selectedFile.path} (${(selectedFile.bytes / (1024*1024*1024)).toFixed(2)} GB)`);
+        if (['waiting_files_selection', 'magnet_conversion'].includes(torrentStatus)) {
+            // 3. ✅ Inteligentní výběr pouze video souborů
+            console.log(`🎬 Vybírám video soubory pomocí inteligentní analýzy...`);
+            const selectedFile = await selectTorrentFiles(client, torrentId);
+
+            if (selectedFile) {
+                console.log(`🎯 Vybraný soubor: ${selectedFile.path} (${(selectedFile.bytes / (1024 * 1024 * 1024)).toFixed(2)} GB)`);
+            }
         }
 
         // 4. Čekej na zpracování
@@ -348,6 +366,8 @@ const addTorrentIfNotExists = async (apiKey, torrentData, infoHash) => {
 // ✅ MAGNET funkce (zachována pro kompatibilitu) - také s inteligentním výběrem
 const addMagnetIfNotExists = async (apiKey, magnetLink, infoHash) => {
     const client = createRDClient(apiKey);
+    let torrentId = undefined;
+    let torrentStatus = undefined;
 
     try {
         console.log(`🔄 RD: Zpracovávám magnet ${infoHash}`);
@@ -358,6 +378,11 @@ const addMagnetIfNotExists = async (apiKey, magnetLink, infoHash) => {
             const existing = existingTorrents.data.find(t =>
                 t.hash && t.hash.toLowerCase() === infoHash.toLowerCase()
             );
+
+            if (existing?.status === 'downloading') {
+                console.log(`⬇️ Stahování probíhá...`);
+                return [downloadingLink];
+            }
 
             if (existing?.status === 'downloaded' && existing.links?.length > 0) {
                 console.log(`✅ Magnet již existuje: ${existing.id}`);
@@ -376,28 +401,37 @@ const addMagnetIfNotExists = async (apiKey, magnetLink, infoHash) => {
                     return unrestrictedLinks;
                 }
             }
+
+            torrentId = existing?.id;
+            torrentStatus = existing?.status;
         } catch (error) {
             console.warn(`⚠️ Chyba při kontrole existujících: ${error.message}`);
         }
 
-        // Přidej magnet
-        console.log(`🧲 Přidávám magnet: ${magnetLink.substring(0, 100)}...`);
+        if (torrentId === undefined) {
+            // Přidej magnet
+            console.log(`🧲 Přidávám magnet: ${magnetLink.substring(0, 100)}...`);
 
-        const addResponse = await client.post('/torrents/addMagnet',
-            `magnet=${encodeURIComponent(magnetLink)}`,
-            {
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded'
+            const addResponse = await client.post('/torrents/addMagnet',
+                `magnet=${encodeURIComponent(magnetLink)}`,
+                {
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    }
                 }
-            }
-        );
+            );
 
-        const torrentId = addResponse.data.id;
-        console.log(`✅ Magnet přidán: ${torrentId}`);
+            console.log(`✅ Magnet přidán: ${torrentId}`);
+            torrentId = addResponse.data.id;
+            torrentStatus = 'waiting_files_selection';
+        }
 
-        // ✅ Také pro magnet použij inteligentní výběr souborů
-        console.log(`🎬 Vybírám video soubory pro magnet...`);
-        await selectTorrentFiles(client, torrentId);
+        if (['waiting_files_selection', 'magnet_conversion'].includes(torrentStatus)) {
+            // ✅ Také pro magnet použij inteligentní výběr souborů
+            console.log(`🎬 Vybírám video soubory pro magnet...`);
+            await selectTorrentFiles(client, torrentId);
+        }
+
         return await waitForTorrentCompletion(client, torrentId);
 
     } catch (error) {
