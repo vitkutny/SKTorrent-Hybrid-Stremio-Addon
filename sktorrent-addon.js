@@ -143,7 +143,7 @@ app.use(asyncHandler(async (req, res, next) => {
 }));
 
 // Middleware pro validaci infoHash
-app.use('/process/:infoHash', (req, res, next) => {
+app.use('/process/:infoHash/:name', (req, res, next) => {
     if (!Utils.validateInfoHash(req.params.infoHash)) {
         return res.status(400).json({ error: 'Neplatný infoHash formát' });
     }
@@ -258,8 +258,8 @@ app.get('/debug/:infoHash', async (req, res) => {
     }
 });
 
-// Middleware pro timeout na /process/:infoHash
-app.use('/process/:infoHash', (req, res, next) => {
+// Middleware pro timeout na /process/:infoHash/:name
+app.use('/process/:infoHash/:name', (req, res, next) => {
     req.timeout = 30000;
     const timeoutHandler = setTimeout(() => {
         if (!res.headersSent) {
@@ -501,9 +501,8 @@ builder.defineStreamHandler(async ({ type, id }, req) => {
         const flagsText = flags.length ? `\n${flags.join(" / ")}` : "";
 
         if (rd && (config.STREAM_MODE === "RD_ONLY" || config.STREAM_MODE === "BOTH")) {
-            const processUrl = availableApiKey
-                ? `${currentBaseUrl}/process/${torrentInfo.infoHash}?api_key=${availableApiKey}`
-                : `${currentBaseUrl}/process/${torrentInfo.infoHash}`;
+            const processUrl = `${currentBaseUrl}/process/${torrentInfo.infoHash}/${encodeURIComponent(torrentInfo.name || cleanedTitle || 'torrent')}`
+                + (availableApiKey ? `?api_key=${availableApiKey}` : '');
             streams.push({
                 name: `⚡ Real-Debrid\n${torrent.category}`,
                 title: `${cleanedTitle}\n👤 ${torrent.seeds}  📀 ${torrent.size}  🚀 Rychlé${flagsText}`,
@@ -557,7 +556,7 @@ app.get('/', (req, res) => {
 });
 
 // ✅ OPRAVENÝ endpoint pro streaming s předáním torrentDataCache - používá torrent soubory pro RD
-app.all('/process/:infoHash', async (req, res) => {
+app.all('/process/:infoHash/:name', async (req, res) => {
     const { infoHash } = req.params;
     let finished = false;
 
